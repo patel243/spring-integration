@@ -8,8 +8,11 @@ Please refer back to this document as a checklist before issuing any pull reques
 
 == Code of Conduct
 
-This project adheres to the Contributor Covenant link:CODE_OF_CONDUCT.adoc[code of conduct].
-By participating, you  are expected to uphold this code. Please report unacceptable behavior to spring-code-of-conduct@pivotal.io.
+Please see our https://github.com/spring-projects/.github/blob/master/CODE_OF_CONDUCT.md[code of conduct]
+
+== Reporting Security Vulnerabilities
+
+Please see our https://github.com/spring-projects/spring-integration/security/policy[Security policy].
 
 == Understand the basics
 
@@ -94,7 +97,7 @@ As discussed above, when issuing pull requests, please ensure that your commit h
 From the command line you can check this using:
 
 ----
-log --graph --pretty=oneline
+git log --graph --pretty=oneline
 ----
 
 As this may cause lots of typing, we recommend creating a global alias, e.g. `git logg` for this:

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,13 @@ package org.springframework.integration.ip.tcp.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
@@ -37,8 +41,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.junit.Rule;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import org.springframework.beans.factory.BeanFactory;
@@ -52,7 +56,6 @@ import org.springframework.integration.ip.IpHeaders;
 import org.springframework.integration.ip.tcp.TcpInboundGateway;
 import org.springframework.integration.ip.tcp.TcpOutboundGateway;
 import org.springframework.integration.ip.util.TestingUtilities;
-import org.springframework.integration.test.rule.Log4j2LevelAdjuster;
 import org.springframework.integration.test.util.TestUtils;
 import org.springframework.integration.util.SimplePool;
 import org.springframework.messaging.Message;
@@ -82,12 +85,6 @@ public class FailoverClientConnectionFactoryTests {
 
 	};
 
-	@Rule
-	public Log4j2LevelAdjuster adjuster =
-			Log4j2LevelAdjuster.trace()
-					.classes(SimplePool.class)
-					.categories("org.springframework.integration.ip.tcp");
-
 	@Test
 	public void testFailoverGood() throws Exception {
 		AbstractClientConnectionFactory factory1 = mock(AbstractClientConnectionFactory.class);
@@ -109,6 +106,71 @@ public class FailoverClientConnectionFactoryTests {
 		GenericMessage<String> message = new GenericMessage<String>("foo");
 		failoverFactory.getConnection().send(message);
 		Mockito.verify(conn2).send(message);
+	}
+
+	@Test
+	public void testRefreshShared() throws Exception {
+		testRefreshShared(false, 10_000);
+	}
+
+	@Test
+	public void testRefreshSharedCloseOnRefresh() throws Exception {
+		testRefreshShared(true, 10_000);
+	}
+
+	@Test
+	public void testRefreshSharedInfinite() throws Exception {
+		testRefreshShared(false, Long.MAX_VALUE);
+	}
+
+	private void testRefreshShared(boolean closeOnRefresh, long interval) throws Exception {
+		AbstractClientConnectionFactory factory1 = mock(AbstractClientConnectionFactory.class);
+		AbstractClientConnectionFactory factory2 = mock(AbstractClientConnectionFactory.class);
+		List<AbstractClientConnectionFactory> factories = new ArrayList<AbstractClientConnectionFactory>();
+		factories.add(factory1);
+		factories.add(factory2);
+		TcpConnectionSupport conn1 = makeMockConnection();
+		doReturn("conn1").when(conn1).getConnectionId();
+		TcpConnectionSupport conn2 = makeMockConnection();
+		doReturn("conn2").when(conn2).getConnectionId();
+		doThrow(new UncheckedIOException(new IOException("fail")))
+			.when(factory1).getConnection();
+		if (closeOnRefresh) {
+			when(factory2.getConnection()).thenReturn(conn1, conn2);
+		}
+		else {
+			when(factory2.getConnection()).thenReturn(conn1);
+		}
+		when(factory1.isActive()).thenReturn(true);
+		when(factory2.isActive()).thenReturn(true);
+		FailoverClientConnectionFactory failoverFactory = new FailoverClientConnectionFactory(factories);
+		failoverFactory.setCloseOnRefresh(closeOnRefresh);
+		failoverFactory.start();
+		TcpConnectionSupport connection = failoverFactory.getConnection();
+		assertThat(TestUtils.getPropertyValue(failoverFactory, "theConnection")).isNotNull();
+		failoverFactory.setRefreshSharedInterval(interval);
+		InOrder inOrder = inOrder(factory1, factory2, conn1, conn2);
+		inOrder.verify(factory1).getConnection();
+		inOrder.verify(factory2).getConnection();
+		inOrder.verify(conn1).registerListener(any());
+		inOrder.verify(conn1).isOpen();
+		assertThat(failoverFactory.getConnection()).isSameAs(connection);
+		inOrder.verifyNoMoreInteractions();
+		failoverFactory.setRefreshSharedInterval(-1);
+		assertThat(failoverFactory.getConnection()).isNotSameAs(connection);
+		inOrder.verify(factory1).getConnection();
+		inOrder.verify(factory2).getConnection();
+		if (closeOnRefresh) {
+			inOrder.verify(conn2).registerListener(any());
+			inOrder.verify(conn2).isOpen();
+			inOrder.verify(conn1).close();
+		}
+		else {
+			inOrder.verify(conn1).registerListener(any());
+			inOrder.verify(conn1).isOpen();
+			inOrder.verify(conn1, never()).close();
+		}
+		inOrder.verifyNoMoreInteractions();
 	}
 
 	@Test(expected = UncheckedIOException.class)

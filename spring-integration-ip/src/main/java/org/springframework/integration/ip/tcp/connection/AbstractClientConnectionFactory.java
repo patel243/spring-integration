@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,13 @@
 
 package org.springframework.integration.ip.tcp.connection;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.Socket;
 import java.time.Duration;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Predicate;
 
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.lang.Nullable;
@@ -27,8 +30,10 @@ import org.springframework.lang.Nullable;
 /**
  * Abstract class for client connection factories; client connection factories
  * establish outgoing connections.
+ *
  * @author Gary Russell
  * @author Artem Bilan
+ *
  * @since 2.0
  *
  */
@@ -41,6 +46,9 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 	private boolean manualListenerRegistration;
 
 	private Duration connectTimeout = Duration.ofSeconds(DEFAULT_CONNECT_TIMEOUT);
+
+	@Nullable
+	private Predicate<TcpConnectionSupport> connectionTest;
 
 	private volatile TcpConnectionSupport theConnection;
 
@@ -66,6 +74,7 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 		return this.connectTimeout;
 	}
 
+
 	/**
 	 * Set whether to automatically (default) or manually add a {@link TcpListener} to the
 	 * connections created by this factory. By default, the factory automatically configures
@@ -75,6 +84,27 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 	 */
 	public void enableManualListenerRegistration() {
 		this.manualListenerRegistration = true;
+	}
+
+	/**
+	 * Get a {@link Predicate} that will be invoked to test a new connection; return true
+	 * to accept the connection, false the reject.
+	 * @return the predicate.
+	 * @since 5.3
+	 */
+	@Nullable
+	protected Predicate<TcpConnectionSupport> getConnectionTest() {
+		return this.connectionTest;
+	}
+
+	/**
+	 * Set a {@link Predicate} that will be invoked to test a new connection; return true
+	 * to accept the connection, false the reject.
+	 * @param connectionTest the predicate.
+	 * @since 5.3
+	 */
+	public void setConnectionTest(@Nullable Predicate<TcpConnectionSupport> connectionTest) {
+		this.connectionTest = connectionTest;
 	}
 
 	/**
@@ -90,7 +120,7 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 	}
 
 	protected TcpConnectionSupport obtainConnection() throws InterruptedException {
-		if (!this.isSingleUse()) {
+		if (!isSingleUse()) {
 			TcpConnectionSupport connection = obtainSharedConnection();
 			if (connection != null) {
 				return connection;
@@ -103,7 +133,7 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 	protected final TcpConnectionSupport obtainSharedConnection() throws InterruptedException {
 		this.theConnectionLock.readLock().lockInterruptibly();
 		try {
-			TcpConnectionSupport connection = this.getTheConnection();
+			TcpConnectionSupport connection = getTheConnection();
 			if (connection != null && connection.isOpen()) {
 				return connection;
 			}
@@ -115,7 +145,7 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 	}
 
 	protected final TcpConnectionSupport obtainNewConnection() throws InterruptedException {
-		boolean singleUse = this.isSingleUse();
+		boolean singleUse = isSingleUse();
 		if (!singleUse) {
 			this.theConnectionLock.writeLock().lockInterruptibly();
 		}
@@ -123,22 +153,13 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 			TcpConnectionSupport connection;
 			if (!singleUse) {
 				// Another write lock holder might have created a new one by now.
-				connection = this.obtainSharedConnection();
-				if (connection != null) {
+				connection = obtainSharedConnection();
+				if (connection != null && connection.isOpen()) {
 					return connection;
 				}
 			}
 
-			if (logger.isDebugEnabled()) {
-				logger.debug("Opening new socket connection to " + this.getHost() + ":" + this.getPort());
-			}
-
-			connection = buildNewConnection();
-			if (!singleUse) {
-				this.setTheConnection(connection);
-			}
-			connection.publishConnectionOpenEvent();
-			return connection;
+			return doObtain(singleUse);
 		}
 		catch (RuntimeException e) {
 			ApplicationEventPublisher applicationEventPublisher = getApplicationEventPublisher();
@@ -154,8 +175,28 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 		}
 	}
 
+	private TcpConnectionSupport doObtain(boolean singleUse) {
+		TcpConnectionSupport connection;
+		if (logger.isDebugEnabled()) {
+			logger.debug("Opening new socket connection to " + getHost() + ":" + getPort());
+		}
+
+		connection = buildNewConnection();
+		if (this.connectionTest != null && !this.connectionTest.test(connection)) {
+			connection.setTestFailed(true);
+			connection.close();
+			throw new UncheckedIOException(new IOException("Connection test failed for " + connection));
+		}
+		if (!singleUse) {
+			setTheConnection(connection);
+		}
+		connection.publishConnectionOpenEvent();
+		return connection;
+	}
+
 	protected TcpConnectionSupport buildNewConnection() {
-		throw new UnsupportedOperationException("Factories that don't override this class' obtainConnection() must implement this method");
+		throw new UnsupportedOperationException(
+				"Factories that don't override this class' obtainConnection() must implement this method");
 	}
 
 	/**
@@ -172,18 +213,21 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 			connection.enableManualListenerRegistration();
 		}
 		else {
-			TcpListener listener = this.getListener();
+			TcpListener listener = getListener();
 			if (listener != null) {
 				connection.registerListener(listener);
 			}
 		}
-		TcpSender sender = this.getSender();
+		TcpSender sender = getSender();
 		if (sender != null) {
 			connection.registerSender(sender);
 		}
-		connection.setMapper(this.getMapper());
-		connection.setDeserializer(this.getDeserializer());
-		connection.setSerializer(this.getSerializer());
+		connection.setMapper(getMapper());
+		connection.setDeserializer(getDeserializer());
+		connection.setSerializer(getSerializer());
+		if (this.connectionTest != null) {
+			connection.setNeedsTest(true);
+		}
 	}
 
 	/**
@@ -196,6 +240,7 @@ public abstract class AbstractClientConnectionFactory extends AbstractConnection
 	/**
 	 * @return the theConnection
 	 */
+	@Nullable
 	protected TcpConnectionSupport getTheConnection() {
 		return this.theConnection;
 	}

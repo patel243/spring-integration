@@ -17,17 +17,10 @@
 package org.springframework.integration.channel;
 
 import org.reactivestreams.Publisher;
-import org.reactivestreams.Subscriber;
 
+import org.springframework.integration.util.IntegrationReactiveUtils;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
-import org.springframework.messaging.MessageHandler;
-import org.springframework.messaging.PollableChannel;
-import org.springframework.messaging.SubscribableChannel;
-
-import reactor.core.publisher.EmitterProcessor;
-import reactor.core.publisher.Flux;
-import reactor.core.scheduler.Schedulers;
 
 /**
  * Utilities for adaptation {@link MessageChannel}s to the {@link Publisher}s.
@@ -35,68 +28,17 @@ import reactor.core.scheduler.Schedulers;
  * @author Artem Bilan
  *
  * @since 5.0
+ *
+ * @deprecated since 5.3 in favor of {@link IntegrationReactiveUtils}.
  */
+@Deprecated
 public final class MessageChannelReactiveUtils {
 
 	private MessageChannelReactiveUtils() {
 	}
 
-	@SuppressWarnings("unchecked")
 	public static <T> Publisher<Message<T>> toPublisher(MessageChannel messageChannel) {
-		if (messageChannel instanceof Publisher) {
-			return (Publisher<Message<T>>) messageChannel;
-		}
-		else if (messageChannel instanceof SubscribableChannel) {
-			return adaptSubscribableChannelToPublisher((SubscribableChannel) messageChannel);
-		}
-		else if (messageChannel instanceof PollableChannel) {
-			return adaptPollableChannelToPublisher((PollableChannel) messageChannel);
-		}
-		else {
-			throw new IllegalArgumentException("The 'messageChannel' must be an instance of Publisher, " +
-					"SubscribableChannel or PollableChannel, not: " + messageChannel);
-		}
-	}
-
-	private static <T> Publisher<Message<T>> adaptSubscribableChannelToPublisher(SubscribableChannel inputChannel) {
-		return Flux.defer(() -> {
-			EmitterProcessor<Message<T>> publisher = EmitterProcessor.create(1);
-			@SuppressWarnings("unchecked")
-			MessageHandler messageHandler = (message) -> publisher.onNext((Message<T>) message);
-			inputChannel.subscribe(messageHandler);
-			return publisher
-					.doOnCancel(() -> inputChannel.unsubscribe(messageHandler));
-		});
-	}
-
-	private static <T> Publisher<Message<T>> adaptPollableChannelToPublisher(PollableChannel inputChannel) {
-		return new PollableChannelPublisherAdapter<>(inputChannel);
-	}
-
-	private static final class PollableChannelPublisherAdapter<T> implements Publisher<Message<T>> {
-
-		private final PollableChannel channel;
-
-		PollableChannelPublisherAdapter(final PollableChannel channel) {
-			this.channel = channel;
-		}
-
-		@Override
-		@SuppressWarnings("unchecked")
-		public void subscribe(Subscriber<? super Message<T>> subscriber) {
-			Flux
-					.<Message<T>>create(sink ->
-							sink.onRequest(n -> {
-								Message<?> m;
-								while (!sink.isCancelled() && n-- > 0
-										&& (m = this.channel.receive()) != null) { // NOSONAR
-									sink.next((Message<T>) m);
-								}
-							}))
-					.subscribeOn(Schedulers.elastic())
-					.subscribe(subscriber);
-		}
-
+		return IntegrationReactiveUtils.messageChannelToFlux(messageChannel);
 	}
 
 }

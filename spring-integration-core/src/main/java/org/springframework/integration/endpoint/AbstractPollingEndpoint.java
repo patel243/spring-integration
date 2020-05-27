@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package org.springframework.integration.endpoint;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
@@ -28,10 +29,14 @@ import java.util.stream.Collectors;
 import org.aopalliance.aop.Advice;
 import org.reactivestreams.Subscription;
 
+import org.springframework.aop.framework.Advised;
 import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.aop.support.NameMatchMethodPointcutAdvisor;
 import org.springframework.beans.factory.BeanClassLoaderAware;
 import org.springframework.beans.factory.BeanInitializationException;
 import org.springframework.core.task.SyncTaskExecutor;
+import org.springframework.integration.aop.ReceiveMessageAdvice;
 import org.springframework.integration.channel.ChannelUtils;
 import org.springframework.integration.channel.MessagePublishingErrorHandler;
 import org.springframework.integration.support.MessagingExceptionWrapper;
@@ -67,6 +72,13 @@ import reactor.core.scheduler.Schedulers;
  */
 public abstract class AbstractPollingEndpoint extends AbstractEndpoint implements BeanClassLoaderAware {
 
+	/**
+	 * A default polling period for {@link PeriodicTrigger}.
+	 */
+	public static final long DEFAULT_POLLING_PERIOD = 10;
+
+	private final Collection<Advice> appliedAdvices = new HashSet<>();
+
 	private final Object initializationMonitor = new Object();
 
 	private Executor taskExecutor = new SyncTaskExecutor();
@@ -75,7 +87,7 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 
 	private ClassLoader beanClassLoader = ClassUtils.getDefaultClassLoader();
 
-	private Trigger trigger = new PeriodicTrigger(10);
+	private Trigger trigger = new PeriodicTrigger(DEFAULT_POLLING_PERIOD);
 
 	private long maxMessagesPerPoll = -1;
 
@@ -117,7 +129,7 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 	}
 
 	public void setTrigger(Trigger trigger) {
-		this.trigger = (trigger != null ? trigger : new PeriodicTrigger(10));
+		this.trigger = (trigger != null ? trigger : new PeriodicTrigger(DEFAULT_POLLING_PERIOD));
 	}
 
 	public void setAdviceChain(List<Advice> adviceChain) {
@@ -168,7 +180,7 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 	 * @return true to only advise the receive operation.
 	 */
 	protected boolean isReceiveOnlyAdvice(Advice advice) {
-		return false;
+		return advice instanceof ReceiveMessageAdvice;
 	}
 
 	/**
@@ -176,6 +188,37 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 	 * @param chain the advice chain {@code Collection}.
 	 */
 	protected void applyReceiveOnlyAdviceChain(Collection<Advice> chain) {
+		if (!CollectionUtils.isEmpty(chain)) {
+			Object source = getReceiveMessageSource();
+			if (source != null) {
+				if (AopUtils.isAopProxy(source)) {
+					Advised advised = (Advised) source;
+					this.appliedAdvices.forEach(advised::removeAdvice);
+					chain.forEach(advice -> advised.addAdvisor(adviceToReceiveAdvisor(advice)));
+				}
+				else {
+					ProxyFactory proxyFactory = new ProxyFactory(source);
+					chain.forEach(advice -> proxyFactory.addAdvisor(adviceToReceiveAdvisor(advice)));
+					source = proxyFactory.getProxy(getBeanClassLoader());
+				}
+				this.appliedAdvices.clear();
+				this.appliedAdvices.addAll(chain);
+				if (!(isSyncExecutor()) && logger.isWarnEnabled()) {
+					logger.warn(getComponentName() + ": A task executor is supplied and " + chain.size()
+							+ "ReceiveMessageAdvice(s) is/are provided. If an advice mutates the source, such "
+							+ "mutations are not thread safe and could cause unexpected results, especially with "
+							+ "high frequency pollers. Consider using a downstream ExecutorChannel instead of "
+							+ "adding an executor to the poller");
+				}
+				setReceiveMessageSource(source);
+			}
+		}
+	}
+
+	private NameMatchMethodPointcutAdvisor adviceToReceiveAdvisor(Advice advice) {
+		NameMatchMethodPointcutAdvisor sourceAdvisor = new NameMatchMethodPointcutAdvisor(advice);
+		sourceAdvisor.addMethodName("receive");
+		return sourceAdvisor;
 	}
 
 	protected boolean isReactive() {
@@ -186,6 +229,14 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 		return this.pollingFlux;
 	}
 
+	protected Object getReceiveMessageSource() {
+		return null;
+	}
+
+	protected void setReceiveMessageSource(Object source) {
+
+	}
+
 	@Override
 	protected void onInit() {
 		synchronized (this.initializationMonitor) {
@@ -193,19 +244,16 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 				return;
 			}
 			Assert.notNull(this.trigger, "Trigger is required");
-			if (this.taskExecutor != null) {
-				if (!(this.taskExecutor instanceof ErrorHandlingTaskExecutor)) {
-					if (this.errorHandler == null) {
-						this.errorHandler = ChannelUtils.getErrorHandler(getBeanFactory());
-						this.errorHandlerIsDefault = true;
-					}
-					this.taskExecutor = new ErrorHandlingTaskExecutor(this.taskExecutor, this.errorHandler);
+			if (this.taskExecutor != null && !(this.taskExecutor instanceof ErrorHandlingTaskExecutor)) {
+				if (this.errorHandler == null) {
+					this.errorHandler = ChannelUtils.getErrorHandler(getBeanFactory());
+					this.errorHandlerIsDefault = true;
 				}
+				this.taskExecutor = new ErrorHandlingTaskExecutor(this.taskExecutor, this.errorHandler);
 			}
-			if (this.transactionSynchronizationFactory == null && this.adviceChain != null) {
-				if (this.adviceChain.stream().anyMatch(TransactionInterceptor.class::isInstance)) {
-					this.transactionSynchronizationFactory = new PassThroughTransactionSynchronizationFactory();
-				}
+			if (this.transactionSynchronizationFactory == null && this.adviceChain != null &&
+					this.adviceChain.stream().anyMatch(TransactionInterceptor.class::isInstance)) {
+				this.transactionSynchronizationFactory = new PassThroughTransactionSynchronizationFactory();
 			}
 			this.initialized = true;
 		}
@@ -328,7 +376,7 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 			return this.pollingTask.call();
 		}
 		catch (Exception e) {
-			if (e instanceof MessagingException) {
+			if (e instanceof MessagingException) { // NOSONAR
 				throw (MessagingException) e;
 			}
 			else {
@@ -395,13 +443,11 @@ public abstract class AbstractPollingEndpoint extends AbstractEndpoint implement
 			try {
 				handleMessage(message);
 			}
-			catch (Exception e) {
-				if (e instanceof MessagingException) {
-					throw new MessagingExceptionWrapper(message, (MessagingException) e);
-				}
-				else {
-					throw new MessagingException(message, e);
-				}
+			catch (MessagingException ex) {
+				throw new MessagingExceptionWrapper(message, ex);
+			}
+			catch (Exception ex) {
+				throw new MessagingException(message, ex);
 			}
 		}
 	}

@@ -398,7 +398,7 @@ Generally, instead of using an `AcceptOnceFileListFilter` in this case, you shou
 
 ==== Configuring with Java Configuration
 
-The following Spring Boot application shows an example of how to configure the inbound adapter with Java configuration:
+The following Spring Boot application shows an example of how to configure the outbound adapter with Java configuration:
 
 ====
 [source, java]
@@ -438,7 +438,7 @@ public class FileReadingJavaApplication {
 
 ==== Configuring with the Java DSL
 
-The following Spring Boot application shows an example of how to configure the inbound adapter with the Java DSL:
+The following Spring Boot application shows an example of how to configure the outbound adapter with the Java DSL:
 
 ====
 [source, java]
@@ -1016,7 +1016,7 @@ The default is `false`.
 When `true`, `apply-sequence` is `false` by default.
 See also `markers-json` (the next attribute).
 <4> When `markers` is true, set this to `true` to have the `FileMarker` objects be converted to a JSON string.
-Requires a supported JSON processor library (e.g. Jackson) on the classpath.
+(Uses a `SimpleJsonSerializer` underneath).
 <5> Set to `false` to disable the inclusion of `sequenceSize` and `sequenceNumber` headers in messages.
 The default is `true`, unless `markers` is `true`.
 When `true` and `markers` is `true`, the markers are included in the sequencing.
@@ -1050,7 +1050,7 @@ public FileSplitter(boolean iterator, boolean markers, boolean markersJson)
 ----
 ====
 
-When `markersJson` is true, the markers are represented as a JSON string, as long as a suitable JSON processor library (e.g Jackson) is on the classpath.
+When `markersJson` is true, the markers are represented as a JSON string (using a `SimpleJsonSerializer`).
 
 Version 5.0 introduced the `firstLineAsHeader` option to specify that the first line of content is a header (such as column names in a CSV file).
 The argument passed to this property is the header name under which the first line is carried as a header in the messages emitted for the remaining lines.
@@ -1112,6 +1112,50 @@ public class FileSplitterApplication {
             .get();
     }
 
+}
+----
+====
+
+[[idempotent-file-splitter]]
+==== Idempotent Downstream Processing a Split File
+
+When `apply-sequence` is true, the splitter adds the line number in the `SEQUENCE_NUMBER` header (when `markers` is true, the markers are counted as lines).
+The line number can be used with an <<./handler-advice.adoc#idempotent-receiver,Idempotent Receiver>> to avoid reprocessing lines after a restart.
+
+For example:
+
+====
+[source, java]
+----
+@Bean
+public ConcurrentMetadataStore store() {
+    return new ZookeeperMetadataStore();
+}
+
+@Bean
+public MetadataStoreSelector selector() {
+    return new MetadataStoreSelector(
+            message -> message.getHeaders().get(FileHeaders.ORIGINAL_FILE, File.class)
+                    .getAbsolutePath(),
+            message -> message.getHeaders().get(IntegrationMessageHeaderAccessor.SEQUENCE_NUMBER)
+                    .toString(),
+            store())
+                    .compareValues(
+                            (oldVal, newVal) -> Integer.parseInt(oldVal) < Integer.parseInt(newVal));
+}
+
+@Bean
+public IdempotentReceiverInterceptor idempotentReceiverInterceptor() {
+    return new IdempotentReceiverInterceptor(selector());
+}
+
+@Bean
+public IntegrationFlow flow() {
+    ...
+    .split(new FileSplitter())
+    ...
+    .handle("lineHandler", e -> e.advice(idempotentReceiverInterceptor()))
+    ...
 }
 ----
 ====

@@ -35,10 +35,10 @@ import org.springframework.beans.factory.config.DestructionAwareBeanPostProcesso
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.integration.aggregator.AggregatingMessageHandler;
+import org.springframework.integration.channel.BroadcastCapableChannel;
 import org.springframework.integration.channel.DirectChannel;
 import org.springframework.integration.channel.FixedSubscriberChannel;
 import org.springframework.integration.channel.FluxMessageChannel;
-import org.springframework.integration.channel.MessageChannelReactiveUtils;
 import org.springframework.integration.channel.interceptor.WireTap;
 import org.springframework.integration.config.ConsumerEndpointFactoryBean;
 import org.springframework.integration.config.SourcePollingChannelAdapterFactoryBean;
@@ -85,10 +85,12 @@ import org.springframework.integration.transformer.MessageTransformingHandler;
 import org.springframework.integration.transformer.MethodInvokingTransformer;
 import org.springframework.integration.transformer.Transformer;
 import org.springframework.integration.util.ClassUtils;
+import org.springframework.integration.util.IntegrationReactiveUtils;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.MessageHandler;
+import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.messaging.support.InterceptableChannel;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
@@ -108,6 +110,7 @@ import reactor.util.function.Tuple2;
  * @author Artem Bilan
  * @author Gary Russell
  * @author Gabriele Del Prete
+ * @author Tim Feuerbach
  *
  * @since 5.2.1
  *
@@ -176,6 +179,24 @@ public abstract class BaseIntegrationFlowDefinition<B extends BaseIntegrationFlo
 	@Nullable
 	protected MessageChannel getCurrentMessageChannel() {
 		return this.currentMessageChannel;
+	}
+
+	/**
+	 * Return the current channel if it is an {@link InterceptableChannel}, otherwise register a new implicit
+	 * {@link DirectChannel} in the flow and return that one.
+	 * @return the current channel after the operation
+	 */
+	protected InterceptableChannel currentInterceptableChannel() {
+		MessageChannel currentChannel = getCurrentMessageChannel();
+		if (currentChannel instanceof InterceptableChannel) {
+			return (InterceptableChannel) currentChannel;
+		}
+		else {
+			DirectChannel newCurrentChannel = new DirectChannel();
+			channel(newCurrentChannel);
+			setImplicitChannel(true);
+			return newCurrentChannel;
+		}
 	}
 
 	protected void setImplicitChannel(boolean implicitChannel) {
@@ -292,6 +313,25 @@ public abstract class BaseIntegrationFlowDefinition<B extends BaseIntegrationFlo
 		PublishSubscribeSpec spec = new PublishSubscribeSpec(executor);
 		publishSubscribeChannelConfigurer.accept(spec);
 		return addComponents(spec.getComponentsToRegister()).channel(spec);
+	}
+
+	/**
+	 * The {@link BroadcastCapableChannel} {@link #channel}
+	 * method specific implementation to allow the use of the 'subflow' subscriber capability.
+	 * @param broadcastCapableChannel the {@link BroadcastCapableChannel} to subscriber sub-flows to.
+	 * @param publishSubscribeChannelConfigurer the {@link Consumer} to specify
+	 * {@link BroadcastPublishSubscribeSpec} 'subflow' definitions.
+	 * @return the current {@link BaseIntegrationFlowDefinition}.
+	 * @since 5.3
+	 */
+	public B publishSubscribeChannel(BroadcastCapableChannel broadcastCapableChannel,
+			Consumer<BroadcastPublishSubscribeSpec> publishSubscribeChannelConfigurer) {
+
+		Assert.notNull(publishSubscribeChannelConfigurer, "'publishSubscribeChannelConfigurer' must not be null");
+		BroadcastPublishSubscribeSpec spec = new BroadcastPublishSubscribeSpec(broadcastCapableChannel);
+		publishSubscribeChannelConfigurer.accept(spec);
+		return addComponents(spec.getComponentsToRegister())
+				.channel(broadcastCapableChannel);
 	}
 
 	/**
@@ -468,14 +508,9 @@ public abstract class BaseIntegrationFlowDefinition<B extends BaseIntegrationFlo
 	 */
 	public B wireTap(WireTapSpec wireTapSpec) {
 		WireTap interceptor = wireTapSpec.get();
-		MessageChannel currentChannel = getCurrentMessageChannel();
-		if (!(currentChannel instanceof InterceptableChannel)) {
-			currentChannel = new DirectChannel();
-			channel(currentChannel);
-			setImplicitChannel(true);
-		}
+		InterceptableChannel currentChannel = currentInterceptableChannel();
 		addComponent(wireTapSpec);
-		((InterceptableChannel) currentChannel).addInterceptor(interceptor);
+		currentChannel.addInterceptor(interceptor);
 		return _this();
 	}
 
@@ -2810,6 +2845,26 @@ public abstract class BaseIntegrationFlowDefinition<B extends BaseIntegrationFlo
 	}
 
 	/**
+	 * Add one or more {@link ChannelInterceptor} implementations
+	 * to the current {@link #currentMessageChannel}, in the given order, after any interceptors already registered.
+	 * @param interceptorArray one or more {@link ChannelInterceptor}s.
+	 * @return the current {@link BaseIntegrationFlowDefinition}.
+	 * @throws IllegalArgumentException if one or more null arguments are provided
+	 * @since 5.3
+	 */
+	public B intercept(ChannelInterceptor... interceptorArray) {
+		Assert.notNull(interceptorArray, "'interceptorArray' must not be null");
+		Assert.noNullElements(interceptorArray, "'interceptorArray' must not contain null elements");
+
+		InterceptableChannel currentChannel = currentInterceptableChannel();
+		for (ChannelInterceptor interceptor : interceptorArray) {
+			currentChannel.addInterceptor(interceptor);
+		}
+
+		return _this();
+	}
+
+	/**
 	 * Populate a {@link FluxMessageChannel} to start a reactive processing for upstream data,
 	 * wrap it to a {@link Flux}, apply provided {@link Function} via {@link Flux#transform(Function)}
 	 * and emit the result to one more {@link FluxMessageChannel}, subscribed in the downstream flow.
@@ -2865,7 +2920,7 @@ public abstract class BaseIntegrationFlowDefinition<B extends BaseIntegrationFlo
 			if (channelForPublisher != null && components.size() > 1
 					&& !(channelForPublisher instanceof MessageChannelReference) &&
 					!(channelForPublisher instanceof FixedSubscriberChannelPrototype)) {
-				publisher = MessageChannelReactiveUtils.toPublisher(channelForPublisher);
+				publisher = IntegrationReactiveUtils.messageChannelToFlux(channelForPublisher);
 			}
 			else {
 				MessageChannel reactiveChannel = new FluxMessageChannel();

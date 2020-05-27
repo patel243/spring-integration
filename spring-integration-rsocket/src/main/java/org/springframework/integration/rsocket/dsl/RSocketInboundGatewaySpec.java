@@ -82,4 +82,18 @@ public class RSocketInboundGatewaySpec extends MessagingGatewaySpec<RSocketInbou
 		return this;
 	}
 
+	/**
+	 * Configure an option to decode an incoming {@link reactor.core.publisher.Flux}
+	 * as a single unit or each its event separately.
+	 * @param decodeFluxAsUnit decode incoming {@link reactor.core.publisher.Flux}
+	 *                         as a single unit or each event separately.
+	 * @return the spec
+	 * @since 5.3
+	 * @see RSocketInboundGateway#setDecodeFluxAsUnit(boolean)
+	 */
+	public RSocketInboundGatewaySpec decodeFluxAsUnit(boolean decodeFluxAsUnit) {
+		this.target.setDecodeFluxAsUnit(decodeFluxAsUnit);
+		return this;
+	}
+
 }

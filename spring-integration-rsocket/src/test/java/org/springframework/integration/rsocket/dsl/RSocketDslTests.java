@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 the original author or authors.
+ * Copyright 2019-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package org.springframework.integration.rsocket.dsl;
 
+import java.time.Duration;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
@@ -30,6 +31,8 @@ import org.springframework.integration.dsl.IntegrationFlows;
 import org.springframework.integration.rsocket.ClientRSocketConnector;
 import org.springframework.integration.rsocket.RSocketInteractionModel;
 import org.springframework.integration.rsocket.ServerRSocketConnector;
+import org.springframework.integration.support.MessageBuilder;
+import org.springframework.messaging.Message;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
@@ -47,14 +50,27 @@ public class RSocketDslTests {
 
 	@Autowired
 	@Qualifier("rsocketUpperCaseRequestFlow.gateway")
-	private Function<Flux<String>, Flux<String>> rsocketUpperCaseFlowFunction;
+	private Function<Object, Flux<String>> rsocketUpperCaseFlowFunction;
 
 	@Test
 	void testRsocketUpperCaseFlows() {
-		Flux<String> result = this.rsocketUpperCaseFlowFunction.apply(Flux.just("a\n", "b\n", "c\n"));
+		Flux<String> result = this.rsocketUpperCaseFlowFunction.apply(Flux.just("a", "b", "c"));
 
 		StepVerifier.create(result)
 				.expectNext("A", "B", "C")
+				.verifyComplete();
+	}
+
+	@Test
+	void testRsocketUpperCaseWholeFlows() {
+		Message<Flux<String>> testMessage =
+				MessageBuilder.withPayload(Flux.just("a", "b", "c", "\n"))
+						.setHeader("route", "/uppercaseWhole")
+						.build();
+		Flux<String> result = this.rsocketUpperCaseFlowFunction.apply(testMessage);
+
+		StepVerifier.create(result)
+				.expectNext("ABC")
 				.verifyComplete();
 	}
 
@@ -79,10 +95,15 @@ public class RSocketDslTests {
 		public IntegrationFlow rsocketUpperCaseRequestFlow(ClientRSocketConnector clientRSocketConnector) {
 			return IntegrationFlows
 					.from(Function.class)
-					.handle(RSockets.outboundGateway("/uppercase")
-							.interactionModel((message) -> RSocketInteractionModel.requestChannel)
-							.expectedResponseType("T(java.lang.String)")
-							.clientRSocketConnector(clientRSocketConnector))
+					.handle(RSockets.outboundGateway(message ->
+							message.getHeaders().getOrDefault("route", "/uppercase"))
+									.interactionModel((message) -> RSocketInteractionModel.requestChannel)
+									.expectedResponseType("T(java.lang.String)")
+									.clientRSocketConnector(clientRSocketConnector),
+							e -> e.customizeMonoReply(
+									(message, mono) ->
+											mono.timeout(Duration.ofMillis(100))
+													.retry()))
 					.get();
 		}
 
@@ -91,6 +112,16 @@ public class RSocketDslTests {
 			return IntegrationFlows
 					.from(RSockets.inboundGateway("/uppercase")
 							.interactionModels(RSocketInteractionModel.requestChannel))
+					.<Flux<String>, Flux<String>>transform((flux) -> flux.map(String::toUpperCase))
+					.get();
+		}
+
+		@Bean
+		public IntegrationFlow rsocketUpperCaseWholeFlow() {
+			return IntegrationFlows
+					.from(RSockets.inboundGateway("/uppercaseWhole")
+							.interactionModels(RSocketInteractionModel.requestChannel)
+							.decodeFluxAsUnit(true))
 					.<Flux<String>, Flux<String>>transform((flux) -> flux.map(String::toUpperCase))
 					.get();
 		}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,22 +19,29 @@ package org.springframework.integration.dsl;
 import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.function.BiFunction;
 
 import org.aopalliance.aop.Advice;
+import org.aopalliance.intercept.MethodInterceptor;
+import org.reactivestreams.Publisher;
 
 import org.springframework.integration.config.ConsumerEndpointFactoryBean;
 import org.springframework.integration.handler.AbstractMessageHandler;
 import org.springframework.integration.handler.AbstractMessageProducingHandler;
 import org.springframework.integration.handler.AbstractReplyProducingMessageHandler;
+import org.springframework.integration.handler.advice.HandleMessageAdviceAdapter;
+import org.springframework.integration.handler.advice.ReactiveRequestHandlerAdvice;
 import org.springframework.integration.router.AbstractMessageRouter;
 import org.springframework.integration.scheduling.PollerMetadata;
 import org.springframework.integration.transaction.TransactionInterceptorBuilder;
+import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageHandler;
 import org.springframework.scheduling.TaskScheduler;
-import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionManager;
 import org.springframework.transaction.interceptor.TransactionInterceptor;
 import org.springframework.util.Assert;
 
+import reactor.core.publisher.Mono;
 import reactor.util.function.Tuple2;
 
 /**
@@ -97,6 +104,21 @@ public abstract class ConsumerEndpointSpec<S extends ConsumerEndpointSpec<S, H>,
 	}
 
 	/**
+	 * Configure a list of {@link MethodInterceptor} objects to be applied, in nested order, to the
+	 * endpoint's handler. The advice objects are applied to the {@code handleMessage()} method
+	 * and therefore to the whole sub-flow afterwards.
+	 * @param interceptors the advice chain.
+	 * @return the endpoint spec.
+	 * @since 5.3
+	 */
+	public S handleMessageAdvice(MethodInterceptor... interceptors) {
+		for (MethodInterceptor interceptor: interceptors) {
+			advice(new HandleMessageAdviceAdapter(interceptor));
+		}
+		return _this();
+	}
+
+	/**
 	 * Configure a list of {@link Advice} objects to be applied, in nested order, to the
 	 * endpoint's handler. The advice objects are applied only to the handler.
 	 * @param advice the advice chain.
@@ -112,10 +134,10 @@ public abstract class ConsumerEndpointSpec<S extends ConsumerEndpointSpec<S, H>,
 	 * {@code PlatformTransactionManager} and default
 	 * {@link org.springframework.transaction.interceptor.DefaultTransactionAttribute}
 	 * for the {@link MessageHandler}.
-	 * @param transactionManager the {@link PlatformTransactionManager} to use.
+	 * @param transactionManager the {@link TransactionManager} to use.
 	 * @return the spec.
 	 */
-	public S transactional(PlatformTransactionManager transactionManager) {
+	public S transactional(TransactionManager transactionManager) {
 		return transactional(transactionManager, false);
 	}
 
@@ -124,14 +146,14 @@ public abstract class ConsumerEndpointSpec<S extends ConsumerEndpointSpec<S, H>,
 	 * {@code PlatformTransactionManager} and default
 	 * {@link org.springframework.transaction.interceptor.DefaultTransactionAttribute}
 	 * for the {@link MessageHandler}.
-	 * @param transactionManager the {@link PlatformTransactionManager} to use.
+	 * @param transactionManager the {@link TransactionManager} to use.
 	 * @param handleMessageAdvice the flag to indicate the target {@link Advice} type:
 	 * {@code false} - regular {@link TransactionInterceptor}; {@code true} -
 	 * {@link org.springframework.integration.transaction.TransactionHandleMessageAdvice}
 	 * extension.
 	 * @return the spec.
 	 */
-	public S transactional(PlatformTransactionManager transactionManager, boolean handleMessageAdvice) {
+	public S transactional(TransactionManager transactionManager, boolean handleMessageAdvice) {
 		return transactional(new TransactionInterceptorBuilder(handleMessageAdvice)
 				.transactionManager(transactionManager)
 				.build());
@@ -174,6 +196,17 @@ public abstract class ConsumerEndpointSpec<S extends ConsumerEndpointSpec<S, H>,
 		TransactionInterceptor transactionInterceptor = new TransactionInterceptorBuilder(handleMessageAdvice).build();
 		this.componentsToRegister.put(transactionInterceptor, null);
 		return transactional(transactionInterceptor);
+	}
+
+	/**
+	 * Specify a {@link BiFunction} for customizing {@link Mono} replies via {@link ReactiveRequestHandlerAdvice}.
+	 * @param replyCustomizer the {@link BiFunction} to propagate into {@link ReactiveRequestHandlerAdvice}.
+	 * @return the spec.
+	 * @since 5.3
+	 * @see ReactiveRequestHandlerAdvice
+	 */
+	public S customizeMonoReply(BiFunction<Message<?>, Mono<?>, Publisher<?>> replyCustomizer) {
+		return advice(new ReactiveRequestHandlerAdvice(replyCustomizer));
 	}
 
 	/**

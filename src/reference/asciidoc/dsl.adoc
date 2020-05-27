@@ -3,6 +3,8 @@
 
 The Spring Integration Java configuration and DSL provides a set of convenient builders and a fluent API that lets you configure Spring Integration message flows from Spring `@Configuration` classes.
 
+(See also <<./kotlin-dsl.adoc#kotlin-dsl,Kotlin DSL>>.)
+
 The Java DSL for Spring Integration is essentially a facade for Spring Integration.
 The DSL provides a simple way to embed Spring Integration Message Flows into your application by using the fluent `Builder` pattern together with existing Java configuration from Spring Framework and Spring Integration.
 We also use and support lambdas (available with Java 8) to further simplify Java configuration.
@@ -594,6 +596,22 @@ When this operator is used at the end of a flow, it is a one-way handler and the
 To make it as a reply-producing flow, you can either use a simple `bridge()` after the `log()` or,  starting with version 5.1, you can use a `logAndReply()` operator instead.
 `logAndReply` can only be used at the end of a flow.
 
+[[java-dsl-intercept]]
+=== Operator intercept()
+
+Starting with version 5.3, the `intercept()` operator allows to register one or more `ChannelInterceptor` instances at the current `MessageChannel` in the flow.
+This is an alternative to creating an explicit `MessageChannel` via the `MessageChannels` API.
+The following example uses a `MessageSelectingInterceptor` to reject certain messages with an exception:
+
+====
+[source,java]
+----
+.transform(...)
+.intercept(new MessageSelectingInterceptor(m -> m.getPayload().isValid()))
+.handle(...)
+----
+====
+
 [[java-dsl-wiretap]]
 === `MessageChannelSpec.wireTap()`
 
@@ -618,7 +636,7 @@ public IntegrationFlow loggingFlow() {
 
 [IMPORTANT]
 ====
-If the `MessageChannel` is an instance of `InterceptableChannel`, the `log()` or `wireTap()` operators are applied to the current `MessageChannel`.
+If the `MessageChannel` is an instance of `InterceptableChannel`, the `log()`, `wireTap()` or `intercept()` operators are applied to the current `MessageChannel`.
 Otherwise, an intermediate `DirectChannel` is injected into the flow for the currently configured endpoint.
 In the following example, the `WireTap` interceptor is added to `myChannel` directly, because `DirectChannel` implements `InterceptableChannel`:
 
@@ -741,6 +759,40 @@ public IntegrationFlow subscribersFlow() {
 
 You can achieve the same result with separate `IntegrationFlow` `@Bean` definitions, but we hope you find the sub-flow style of logic composition useful.
 We find that it results in shorter (and so more readable) code.
+
+Starting with version 5.3, a `BroadcastCapableChannel`-based `publishSubscribeChannel()` implementation is provided to configure sub-flow subscribers on broker-backed message channels.
+For example we now can configure several subscribers as sub-flows on the `Jms.publishSubscribeChannel()`:
+
+====
+[source,java]
+----
+@Bean
+public BroadcastCapableChannel jmsPublishSubscribeChannel() {
+    return Jms.publishSubscribeChannel(jmsConnectionFactory())
+                .destination("pubsub")
+                .get();
+}
+
+@Bean
+public IntegrationFlow pubSubFlow() {
+    return f -> f
+            .publishSubscribeChannel(jmsPublishSubscribeChannel(),
+                    pubsub -> pubsub
+                            .subscribe(subFlow -> subFlow
+                                .channel(c -> c.queue("jmsPubSubBridgeChannel1")))
+                            .subscribe(subFlow -> subFlow
+                                .channel(c -> c.queue("jmsPubSubBridgeChannel2"))));
+}
+
+@Bean
+public BroadcastCapableChannel jmsPublishSubscribeChannel(ConnectionFactory jmsConnectionFactory) {
+    return (BroadcastCapableChannel) Jms.publishSubscribeChannel(jmsConnectionFactory)
+            .destination("pubsub")
+            .get();
+}
+
+----
+====
 
 A similar `publish-subscribe` sub-flow composition provides the `.routeToRecipients()` method.
 

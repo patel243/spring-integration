@@ -1,5 +1,5 @@
 /*
- * Copyright 2001-2019 the original author or authors.
+ * Copyright 2001-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -78,6 +78,8 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 
 	private TcpListener listener;
 
+	private volatile TcpListener testListener;
+
 	private TcpSender sender;
 
 	private String connectionId;
@@ -91,6 +93,15 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	private boolean noReadErrorOnClose;
 
 	private boolean manualListenerRegistration;
+
+	/*
+	 * This boolean is to avoid looking for a temporary listener when not needed
+	 * to avoid a CPU cache flush. This does not have to be volatile because it
+	 * is reset by the thread that checks for the temporary listener.
+	 */
+	private boolean needsTest;
+
+	private volatile boolean testFailed;
 
 	public TcpConnectionSupport() {
 		this(null);
@@ -115,7 +126,7 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	 * during event publishing, may be null, in which case "unknown" will be used.
 	 */
 	public TcpConnectionSupport(Socket socket, boolean server, boolean lookupHost,
-			ApplicationEventPublisher applicationEventPublisher,
+			@Nullable ApplicationEventPublisher applicationEventPublisher,
 			@Nullable String connectionFactoryName) {
 
 		this.socketInfo = new SocketInfo(socket);
@@ -140,6 +151,10 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 		if (this.logger.isDebugEnabled()) {
 			this.logger.debug("New connection " + this.connectionId);
 		}
+	}
+
+	void setTestFailed(boolean testFailed) {
+		this.testFailed = testFailed;
 	}
 
 	/**
@@ -239,12 +254,32 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	}
 
 	/**
+	 * Set to true to use a temporary listener for just the first incoming message.
+	 * @param needsTest true for a temporary listener.
+	 * @since 5.3
+	 */
+	public void setNeedsTest(boolean needsTest) {
+		this.needsTest = needsTest;
+	}
+
+	/**
 	 * Set the listener that will receive incoming Messages.
 	 * @param listener The listener.
 	 */
 	public void registerListener(@Nullable TcpListener listener) {
 		this.listener = listener;
 		this.listenerRegisteredLatch.countDown();
+	}
+
+	/**
+	 * Set a temporary listener to receive just the first incoming message.
+	 * Used in conjunction with a connectionTest in a client connection
+	 * factory.
+	 * @param tListener the test listener.
+	 * @since 5.3
+	 */
+	public void registerTestListener(TcpListener tListener) {
+		this.testListener = tListener;
 	}
 
 	/**
@@ -276,7 +311,11 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	 */
 	@Override
 	public TcpListener getListener() {
-		if (this.manualListenerRegistration) {
+		if (this.needsTest && this.testListener != null) {
+			this.needsTest = false;
+			return this.testListener;
+		}
+		if (this.manualListenerRegistration && !this.testFailed) {
 			if (this.logger.isDebugEnabled()) {
 				this.logger.debug(getConnectionId() + " Waiting for listener registration");
 			}
@@ -359,21 +398,15 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	}
 
 	protected void publishConnectionOpenEvent() {
-		TcpConnectionEvent event = new TcpConnectionOpenEvent(this,
-				getConnectionFactoryName());
-		doPublish(event);
+		doPublish(new TcpConnectionOpenEvent(this, getConnectionFactoryName()));
 	}
 
 	protected void publishConnectionCloseEvent() {
-		TcpConnectionEvent event = new TcpConnectionCloseEvent(this,
-				getConnectionFactoryName());
-		doPublish(event);
+		doPublish(new TcpConnectionCloseEvent(this, getConnectionFactoryName()));
 	}
 
 	protected void publishConnectionExceptionEvent(Throwable t) {
-		TcpConnectionEvent event = new TcpConnectionExceptionEvent(this,
-				getConnectionFactoryName(), t);
-		doPublish(event);
+		doPublish(new TcpConnectionExceptionEvent(this, getConnectionFactoryName(), t));
 	}
 
 	/**

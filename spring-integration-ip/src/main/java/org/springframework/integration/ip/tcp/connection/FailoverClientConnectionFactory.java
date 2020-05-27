@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package org.springframework.integration.ip.tcp.connection;
 
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
@@ -34,26 +35,81 @@ import org.springframework.util.Assert;
  * Given a list of connection factories, serves up {@link TcpConnection}s
  * that can iterate over a connection from each factory until the write
  * succeeds or the list is exhausted.
+ *
  * @author Gary Russell
  * @since 2.2
  *
  */
 public class FailoverClientConnectionFactory extends AbstractClientConnectionFactory {
 
+	private static final long DEFAULT_REFRESH_SHARED_INTERVAL = Long.MAX_VALUE;
+
 	private final List<AbstractClientConnectionFactory> factories;
 
+	private final boolean cachingDelegates;
+
+	private long refreshSharedInterval = DEFAULT_REFRESH_SHARED_INTERVAL;
+
+	private boolean closeOnRefresh = true;
+
+	private boolean failBack;
+
+	private volatile long creationTime;
+
+	/**
+	 * Construct an instance with the provided delegate factories.
+	 * @param factories the delegates.
+	 */
 	public FailoverClientConnectionFactory(List<AbstractClientConnectionFactory> factories) {
 		super("", 0);
 		Assert.notEmpty(factories, "At least one factory is required");
-		this.factories = factories;
+		this.factories = new ArrayList<>(factories);
+		this.cachingDelegates =
+				factories.stream()
+						.anyMatch(factory -> factory instanceof CachingClientConnectionFactory);
+	}
+
+	/**
+	 * When using a shared connection {@link #setSingleUse(boolean) singleUse} is false,
+	 * specify how long to wait before trying to fail back to start from the beginning of
+	 * the factory list. Default is {@link Long#MAX_VALUE} - meaning only fail back when
+	 * the current connection fails. Cannot be changed when using
+	 * {@link CachingClientConnectionFactory} delegates.
+	 * @param refreshSharedInterval the interval in milliseconds.
+	 * @since 4.3.22
+	 * @see #setSingleUse(boolean)
+	 * @see #setCloseOnRefresh(boolean)
+	 */
+	public void setRefreshSharedInterval(long refreshSharedInterval) {
+		Assert.isTrue(!this.cachingDelegates,
+				"'refreshSharedInterval' cannot be changed when using 'CachingClientConnectionFactory` delegates");
+		this.refreshSharedInterval = refreshSharedInterval;
+		this.failBack = refreshSharedInterval != Long.MAX_VALUE;
+	}
+
+	/**
+	 * When using a shared connection {@link #setSingleUse(boolean) singleUse} is false,
+	 * set this to true to close the old shared connection after a refresh. If this is
+	 * false, the connection will remain open, but unused until its connection factory is
+	 * again used to get a connection. Default is false for backwards compatibility.
+	 * Cannot be changed when using {@link CachingClientConnectionFactory} delegates.
+	 * @param closeOnRefresh true to close.
+	 * @since 4.3.22
+	 * @see #setSingleUse(boolean)
+	 * @see #setRefreshSharedInterval(long)
+	 */
+	public void setCloseOnRefresh(boolean closeOnRefresh) {
+		Assert.isTrue(!this.cachingDelegates,
+				"'closeOnRefresh' cannot be changed when using 'CachingClientConnectionFactory` delegates");
+		this.closeOnRefresh = closeOnRefresh;
 	}
 
 	@Override
 	protected void onInit() {
 		super.onInit();
 		for (AbstractClientConnectionFactory factory : this.factories) {
-			Assert.state(!(this.isSingleUse() ^ factory.isSingleUse()),
-				"Inconsistent singleUse - delegate factories must match this one");
+			Assert.state(isSingleUse() == factory.isSingleUse(),
+					"Inconsistent singleUse - delegate factories must match this one");
 			factory.enableManualListenerRegistration();
 		}
 	}
@@ -93,19 +149,41 @@ public class FailoverClientConnectionFactory extends AbstractClientConnectionFac
 
 	@Override
 	protected TcpConnectionSupport obtainConnection() throws InterruptedException {
-		TcpConnectionSupport connection = this.getTheConnection();
-		if (connection != null && connection.isOpen()) {
-			((FailoverTcpConnection) connection).incrementEpoch();
-			return connection;
+		FailoverTcpConnection sharedConnection = (FailoverTcpConnection) getTheConnection();
+		boolean shared = !isSingleUse() && !this.cachingDelegates;
+		boolean refreshShared =
+				this.failBack && shared && sharedConnection != null
+						&& System.currentTimeMillis() > this.creationTime + this.refreshSharedInterval;
+		if (sharedConnection != null && sharedConnection.isOpen() && !refreshShared) {
+			sharedConnection.incrementEpoch();
+			return sharedConnection;
 		}
 		FailoverTcpConnection failoverTcpConnection = new FailoverTcpConnection(this.factories);
 		if (getListener() != null) {
 			failoverTcpConnection.registerListener(getListener());
 		}
 		failoverTcpConnection.incrementEpoch();
+		if (shared) {
+			closeRefreshedIfNecessary(sharedConnection, refreshShared, failoverTcpConnection);
+			setTheConnection(failoverTcpConnection);
+		}
 		return failoverTcpConnection;
 	}
 
+	private void closeRefreshedIfNecessary(FailoverTcpConnection sharedConnection, boolean refreshShared,
+			FailoverTcpConnection failoverTcpConnection) {
+
+		this.creationTime = System.currentTimeMillis();
+		/*
+		 * We may have simply wrapped the same connection in a new wrapper; don't close.
+		 */
+		if (refreshShared && this.closeOnRefresh
+				&& !sharedConnection.delegate.equals(failoverTcpConnection.delegate)
+				&& sharedConnection.isOpen()) {
+
+			sharedConnection.close();
+		}
+	}
 
 	@Override
 	public void start() {
@@ -113,7 +191,7 @@ public class FailoverClientConnectionFactory extends AbstractClientConnectionFac
 			factory.enableManualListenerRegistration();
 			factory.start();
 		}
-		this.setActive(true);
+		setActive(true);
 		super.start();
 	}
 
@@ -132,7 +210,7 @@ public class FailoverClientConnectionFactory extends AbstractClientConnectionFac
 	public boolean isRunning() {
 		boolean isRunning = true;
 		for (AbstractClientConnectionFactory factory : this.factories) {
-			isRunning = !isRunning ? false : factory.isRunning();
+			isRunning = isRunning && factory.isRunning();
 		}
 		return isRunning;
 	}
@@ -150,15 +228,15 @@ public class FailoverClientConnectionFactory extends AbstractClientConnectionFac
 
 		private final String connectionId;
 
+		private final AtomicLong epoch = new AtomicLong();
+
 		private volatile Iterator<AbstractClientConnectionFactory> factoryIterator;
 
 		private volatile AbstractClientConnectionFactory currentFactory;
 
-		private volatile TcpConnectionSupport delegate;
+		volatile TcpConnectionSupport delegate; // NOSONAR visibility
 
 		private volatile boolean open = true;
-
-		private final AtomicLong epoch = new AtomicLong();
 
 		private FailoverTcpConnection(List<AbstractClientConnectionFactory> factories) throws InterruptedException {
 			this.connectionFactories = factories;
@@ -361,9 +439,10 @@ public class FailoverClientConnectionFactory extends AbstractClientConnectionFac
 		@Override
 		public boolean onMessage(Message<?> message) {
 			if (this.delegate.getConnectionId().equals(message.getHeaders().get(IpHeaders.CONNECTION_ID))) {
-				AbstractIntegrationMessageBuilder<?> messageBuilder = FailoverClientConnectionFactory.this
-						.getMessageBuilderFactory().fromMessage(message)
-							.setHeader(IpHeaders.CONNECTION_ID, this.getConnectionId());
+				AbstractIntegrationMessageBuilder<?> messageBuilder =
+						getMessageBuilderFactory()
+								.fromMessage(message)
+								.setHeader(IpHeaders.CONNECTION_ID, this.getConnectionId());
 				if (message.getHeaders().get(IpHeaders.ACTUAL_CONNECTION_ID) == null) {
 					messageBuilder.setHeader(IpHeaders.ACTUAL_CONNECTION_ID,
 							message.getHeaders().get(IpHeaders.CONNECTION_ID));
@@ -388,4 +467,5 @@ public class FailoverClientConnectionFactory extends AbstractClientConnectionFac
 		}
 
 	}
+
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,9 @@
 package org.springframework.integration.ip.tcp.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.fail;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.atLeast;
@@ -29,30 +31,38 @@ import static org.mockito.Mockito.when;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.BeanFactory;
-import org.springframework.context.ApplicationEvent;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.integration.channel.NullChannel;
+import org.springframework.integration.channel.QueueChannel;
 import org.springframework.integration.context.IntegrationContextUtils;
 import org.springframework.integration.ip.config.TcpConnectionFactoryFactoryBean;
 import org.springframework.integration.ip.event.IpIntegrationEvent;
+import org.springframework.integration.ip.tcp.TcpOutboundGateway;
 import org.springframework.integration.ip.tcp.TcpReceivingChannelAdapter;
-import org.springframework.integration.test.rule.Log4j2LevelAdjuster;
 import org.springframework.integration.test.util.TestUtils;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessagingException;
+import org.springframework.messaging.support.ErrorMessage;
+import org.springframework.messaging.support.GenericMessage;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
@@ -64,9 +74,6 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
  *
  */
 public class ConnectionFactoryTests {
-
-	@Rule
-	public Log4j2LevelAdjuster adjuster = Log4j2LevelAdjuster.trace();
 
 	@Test
 	public void factoryBeanTests() {
@@ -98,23 +105,13 @@ public class ConnectionFactoryTests {
 				: 5; // Listening, + OPEN, CLOSE (but we *might* get exceptions, depending on timing).
 		final CountDownLatch serverListeningLatch = new CountDownLatch(1);
 		final CountDownLatch eventLatch = new CountDownLatch(expectedEvents);
-		ApplicationEventPublisher publisher = new ApplicationEventPublisher() {
-
-			@Override
-			public void publishEvent(ApplicationEvent event) {
-				LogFactory.getLog(this.getClass()).trace("Received: " + event);
-				events.add((IpIntegrationEvent) event);
-				if (event instanceof TcpConnectionServerListeningEvent) {
-					serverListeningLatch.countDown();
-				}
-				eventLatch.countDown();
+		ApplicationEventPublisher publisher = event -> {
+			LogFactory.getLog(this.getClass()).trace("Received: " + event);
+			events.add((IpIntegrationEvent) event);
+			if (event instanceof TcpConnectionServerListeningEvent) {
+				serverListeningLatch.countDown();
 			}
-
-			@Override
-			public void publishEvent(Object event) {
-
-			}
-
+			eventLatch.countDown();
 		};
 		serverFactory.setBeanName("serverFactory");
 		serverFactory.setApplicationEventPublisher(publisher);
@@ -156,12 +153,8 @@ public class ConnectionFactoryTests {
 		assertThat(serverFactory.closeConnection(servers.get(0))).isTrue();
 		servers = serverFactory.getOpenConnectionIds();
 		assertThat(servers.size()).isEqualTo(0);
-		int n = 0;
+		await().atMost(Duration.ofSeconds(10)).until(() -> clientFactory.getOpenConnectionIds().size() == 0);
 		clients = clientFactory.getOpenConnectionIds();
-		while (n++ < 100 && clients.size() > 0) {
-			Thread.sleep(100);
-			clients = clientFactory.getOpenConnectionIds();
-		}
 		assertThat(clients.size()).isEqualTo(0);
 		assertThat(eventLatch.await(10, TimeUnit.SECONDS)).isTrue();
 		assertThat(events.size())
@@ -234,10 +227,8 @@ public class ConnectionFactoryTests {
 				.execute(factory::stop);
 		int n = 0;
 		DirectFieldAccessor accessor = new DirectFieldAccessor(factory);
-		while (n++ < 200 && accessor.getPropertyValue(property) != null) {
-			Thread.sleep(100);
-		}
-		assertThat(n < 200).as("Stop was not invoked in time").isTrue();
+		await("Stop was not invoked in time").atMost(Duration.ofSeconds(20))
+				.until(() -> accessor.getPropertyValue(property) == null);
 		latch2.countDown();
 		assertThat(latch3.await(10, TimeUnit.SECONDS)).as("missing debug log").isTrue();
 		String expected = "bean 'foo', port=" + factory.getPort() + message;
@@ -245,6 +236,101 @@ public class ConnectionFactoryTests {
 		verify(logger, atLeast(1)).debug(captor.capture());
 		assertThat(captor.getAllValues()).contains(expected);
 		factory.stop();
+	}
+
+	@Test
+	void healthCheckSuccessNet() throws InterruptedException {
+		healthCheckSuccess(new TcpNetServerConnectionFactory(0), false);
+	}
+
+	@Test
+	void healthCheckSuccessNio() throws InterruptedException {
+		healthCheckSuccess(new TcpNioServerConnectionFactory(0), false);
+	}
+
+	@Test
+	void healthCheckFailureNet() throws InterruptedException {
+		healthCheckSuccess(new TcpNetServerConnectionFactory(0), true);
+	}
+
+	@Test
+	void healthCheckFailureNio() throws InterruptedException {
+		healthCheckSuccess(new TcpNioServerConnectionFactory(0), true);
+	}
+
+	private void healthCheckSuccess(AbstractServerConnectionFactory server, boolean fail) throws InterruptedException {
+		CountDownLatch serverUp = new CountDownLatch(1);
+		server.setApplicationEventPublisher(event -> {
+			if (event instanceof TcpConnectionServerListeningEvent) {
+				serverUp.countDown();
+			}
+		});
+		server.setBeanFactory(mock(BeanFactory.class));
+		AtomicReference<TcpConnection> connection = new AtomicReference<>();
+		server.registerSender(conn -> {
+			connection.set(conn);
+		});
+		AtomicInteger tested = new AtomicInteger();
+		server.registerListener(msg -> {
+			if (!(msg instanceof ErrorMessage)) {
+				String payload = new String((byte[]) msg.getPayload());
+				if (payload.equals("PING")) {
+					tested.incrementAndGet();
+					connection.get().send(new GenericMessage<>(fail ? "PANG" : "PONG"));
+				}
+				else {
+					connection.get().send(msg);
+				}
+			}
+			return false;
+		});
+		server.start();
+		assertThat(serverUp.await(10, TimeUnit.SECONDS)).isTrue();
+		TcpNetClientConnectionFactory clientFactory = new TcpNetClientConnectionFactory("localhost", server.getPort());
+		clientFactory.setApplicationEventPublisher(event -> { });
+		clientFactory.setConnectionTest(conn -> {
+			CountDownLatch latch = new CountDownLatch(1);
+			AtomicBoolean result = new AtomicBoolean();
+			conn.registerTestListener(msg -> {
+				if (Arrays.equals("PONG".getBytes(), (byte[]) msg.getPayload())) {
+					result.set(true);
+				}
+				latch.countDown();
+				return false;
+			});
+			conn.send(new GenericMessage<>("PING"));
+			try {
+				latch.await(10, TimeUnit.SECONDS);
+			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+			return result.get();
+		});
+		TcpOutboundGateway gateway = new TcpOutboundGateway();
+		gateway.setRemoteTimeout(60000);
+		gateway.setConnectionFactory(clientFactory);
+		QueueChannel outputChannel = new QueueChannel();
+		gateway.setOutputChannel(outputChannel);
+		gateway.start();
+		if (fail) {
+			assertThatExceptionOfType(MessagingException.class).isThrownBy(() ->
+				gateway.handleMessage(new GenericMessage<>("test1")))
+					.withMessageContaining("Connection test failed for");
+		}
+		else {
+			gateway.handleMessage(new GenericMessage<>("test1"));
+			Message<?> received = outputChannel.receive(0);
+			assertThat(received).isNotNull();
+			assertThat(received.getPayload()).isEqualTo("test1".getBytes());
+			gateway.handleMessage(new GenericMessage<>("test2"));
+			received = outputChannel.receive(0);
+			assertThat(received).isNotNull();
+			assertThat(received.getPayload()).isEqualTo("test2".getBytes());
+			assertThat(tested.get()).isEqualTo(1);
+		}
+		gateway.stop();
+		server.stop();
 	}
 
 	@SuppressWarnings("serial")

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,11 +30,14 @@ import org.eclipse.paho.client.mqttv3.MqttMessage;
 
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.ApplicationEventPublisherAware;
+import org.springframework.integration.IntegrationMessageHeaderAccessor;
+import org.springframework.integration.acks.SimpleAcknowledgment;
 import org.springframework.integration.mqtt.core.ConsumerStopAction;
 import org.springframework.integration.mqtt.core.DefaultMqttPahoClientFactory;
 import org.springframework.integration.mqtt.core.MqttPahoClientFactory;
 import org.springframework.integration.mqtt.event.MqttConnectionFailedEvent;
 import org.springframework.integration.mqtt.event.MqttSubscribedEvent;
+import org.springframework.integration.support.AbstractIntegrationMessageBuilder;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessagingException;
 import org.springframework.util.Assert;
@@ -51,15 +54,27 @@ import org.springframework.util.Assert;
 public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDrivenChannelAdapter
 		implements MqttCallback, ApplicationEventPublisherAware {
 
-	public static final long DEFAULT_COMPLETION_TIMEOUT = 30000L;
+	/**
+	 * The default completion timeout in milliseconds.
+	 */
+	public static final long DEFAULT_COMPLETION_TIMEOUT = 30_000L;
 
-	private static final int DEFAULT_RECOVERY_INTERVAL = 10000;
+	/**
+	 * The default disconnect completion timeout in milliseconds.
+	 */
+	public static final long DISCONNECT_COMPLETION_TIMEOUT = 5_000L;
+
+	private static final int DEFAULT_RECOVERY_INTERVAL = 10_000;
 
 	private final MqttPahoClientFactory clientFactory;
 
 	private int recoveryInterval = DEFAULT_RECOVERY_INTERVAL;
 
-	private volatile long completionTimeout = DEFAULT_COMPLETION_TIMEOUT;
+	private long completionTimeout = DEFAULT_COMPLETION_TIMEOUT;
+
+	private long disconnectCompletionTimeout = DISCONNECT_COMPLETION_TIMEOUT;
+
+	private boolean manualAcks;
 
 	private volatile IMqttClient client;
 
@@ -118,8 +133,18 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 	 * @param completionTimeout The timeout.
 	 * @since 4.1
 	 */
-	public void setCompletionTimeout(long completionTimeout) {
+	public synchronized void setCompletionTimeout(long completionTimeout) {
 		this.completionTimeout = completionTimeout;
+	}
+
+	/**
+	 * Set the completion timeout when disconnecting. Not settable using the namespace.
+	 * Default {@value #DISCONNECT_COMPLETION_TIMEOUT} milliseconds.
+	 * @param completionTimeout The timeout.
+	 * @since 5.1.10
+	 */
+	public synchronized void setDisconnectCompletionTimeout(long completionTimeout) {
+		this.disconnectCompletionTimeout = completionTimeout;
 	}
 
 	/**
@@ -130,6 +155,15 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 	 */
 	public synchronized void setRecoveryInterval(int recoveryInterval) {
 		this.recoveryInterval = recoveryInterval;
+	}
+
+	/**
+	 * Set the acknowledgment mode to manual.
+	 * @param manualAcks true for manual acks.
+	 * @since 5.3
+	 */
+	public void setManualAcks(boolean manualAcks) {
+		this.manualAcks = manualAcks;
 	}
 
 	/**
@@ -161,7 +195,7 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 			try {
 				if (this.consumerStopAction.equals(ConsumerStopAction.UNSUBSCRIBE_ALWAYS)
 						|| (this.consumerStopAction.equals(ConsumerStopAction.UNSUBSCRIBE_CLEAN)
-								&& this.cleanSession)) {
+						&& this.cleanSession)) {
 
 					this.client.unsubscribe(getTopic());
 				}
@@ -170,7 +204,7 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 				logger.error("Exception while unsubscribing", e);
 			}
 			try {
-				this.client.disconnectForcibly(this.completionTimeout);
+				this.client.disconnectForcibly(this.disconnectCompletionTimeout);
 			}
 			catch (MqttException e) {
 				logger.error("Exception while disconnecting", e);
@@ -243,6 +277,7 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 		String[] topics = getTopic();
 		try {
 			this.client.connect(connectionOptions);
+			this.client.setManualAcks(this.manualAcks);
 			int[] requestedQos = getQos();
 			int[] grantedQos = Arrays.copyOf(requestedQos, requestedQos.length);
 			this.client.subscribe(topics, grantedQos);
@@ -262,7 +297,7 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 				this.applicationEventPublisher.publishEvent(new MqttConnectionFailedEvent(this, e));
 			}
 			logger.error("Error connecting or subscribing to " + Arrays.toString(topics), e);
-			this.client.disconnectForcibly(this.completionTimeout);
+			this.client.disconnectForcibly(this.disconnectCompletionTimeout);
 			try {
 				this.client.setCallback(null);
 				this.client.close();
@@ -345,7 +380,12 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 
 	@Override
 	public void messageArrived(String topic, MqttMessage mqttMessage) {
-		Message<?> message = this.getConverter().toMessage(topic, mqttMessage);
+		AbstractIntegrationMessageBuilder<?> builder = getConverter().toMessageBuilder(topic, mqttMessage);
+		if (this.manualAcks) {
+			builder.setHeader(IntegrationMessageHeaderAccessor.ACKNOWLEDGMENT_CALLBACK,
+					new AcknowledgmentImpl(mqttMessage.getId(), mqttMessage.getQos(), this.client));
+		}
+		Message<?> message = builder.build();
 		try {
 			sendMessage(message);
 		}
@@ -357,6 +397,48 @@ public class MqttPahoMessageDrivenChannelAdapter extends AbstractMqttMessageDriv
 
 	@Override
 	public void deliveryComplete(IMqttDeliveryToken token) {
+	}
+
+	/**
+	 * Used to complete message arrival when {@link AckMode#MANUAL}.
+	 *
+	 * @since 5.3
+	 */
+	private static class AcknowledgmentImpl implements SimpleAcknowledgment {
+
+		private final int id;
+
+		private final int qos;
+
+		private final IMqttClient ackClient;
+
+		/**
+		 * Construct an instance with the provided properties.
+		 * @param id the message id.
+		 * @param qos the message QOS.
+		 * @param client the client.
+		 */
+		AcknowledgmentImpl(int id, int qos, IMqttClient client) {
+			this.id = id;
+			this.qos = qos;
+			this.ackClient = client;
+		}
+
+		@Override
+		public void acknowledge() {
+			if (this.ackClient != null) {
+				try {
+					this.ackClient.messageArrivedComplete(this.id, this.qos);
+				}
+				catch (MqttException e) {
+					throw new IllegalStateException(e);
+				}
+			}
+			else {
+				throw new IllegalStateException("Client has changed");
+			}
+		}
+
 	}
 
 }

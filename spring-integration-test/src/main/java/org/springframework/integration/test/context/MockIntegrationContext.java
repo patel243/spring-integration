@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 the original author or authors.
+ * Copyright 2017-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.Lifecycle;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.integration.core.MessageProducer;
 import org.springframework.integration.core.MessageSource;
 import org.springframework.integration.endpoint.IntegrationConsumer;
@@ -94,23 +95,39 @@ public class MockIntegrationContext implements BeanFactoryAware {
 		this.beans.entrySet()
 				.stream()
 				.filter(e -> names == null || names.contains(e.getKey()))
-				.forEach(e -> {
-					Object endpoint = this.beanFactory.getBean(e.getKey());
-					DirectFieldAccessor directFieldAccessor = new DirectFieldAccessor(endpoint);
-					if (endpoint instanceof SourcePollingChannelAdapter) {
-						directFieldAccessor.setPropertyValue("source", e.getValue());
-					}
-					else if (endpoint instanceof ReactiveStreamsConsumer) {
-						Tuple2<?, ?> value = (Tuple2<?, ?>) e.getValue();
-						directFieldAccessor.setPropertyValue(HANDLER, value.getT1());
-						directFieldAccessor.setPropertyValue("subscriber", value.getT2());
-					}
-					else if (endpoint instanceof IntegrationConsumer) {
-						directFieldAccessor.setPropertyValue(HANDLER, e.getValue());
-					}
-				});
+				.forEach(e -> resetBean(this.beanFactory.getBean(e.getKey()), e.getValue()));
 
-		this.beans.clear();
+		if (!ObjectUtils.isEmpty(beanNames)) {
+			for (String name : beanNames) {
+				this.beans.remove(name);
+			}
+		}
+		else {
+			this.beans.clear();
+		}
+	}
+
+	private void resetBean(Object endpoint, Object handler) {
+		DirectFieldAccessor directFieldAccessor = new DirectFieldAccessor(endpoint);
+		SmartLifecycle lifecycle = null;
+		if (endpoint instanceof SmartLifecycle && ((SmartLifecycle) endpoint).isRunning()) {
+			lifecycle = (SmartLifecycle) endpoint;
+			lifecycle.stop();
+		}
+		if (endpoint instanceof SourcePollingChannelAdapter) {
+			directFieldAccessor.setPropertyValue("source", handler);
+		}
+		else if (endpoint instanceof ReactiveStreamsConsumer) {
+			Tuple2<?, ?> value = (Tuple2<?, ?>) handler;
+			directFieldAccessor.setPropertyValue(HANDLER, value.getT1());
+			directFieldAccessor.setPropertyValue("subscriber", value.getT2());
+		}
+		else if (endpoint instanceof IntegrationConsumer) {
+			directFieldAccessor.setPropertyValue(HANDLER, handler);
+		}
+		if (lifecycle != null && lifecycle.isAutoStartup()) {
+			lifecycle.start();
+		}
 	}
 
 	/**

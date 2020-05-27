@@ -24,11 +24,11 @@ import org.reactivestreams.Subscription;
 
 import org.springframework.context.Lifecycle;
 import org.springframework.integration.channel.ChannelUtils;
-import org.springframework.integration.channel.MessageChannelReactiveUtils;
 import org.springframework.integration.channel.NullChannel;
 import org.springframework.integration.core.MessageProducer;
 import org.springframework.integration.handler.ReactiveMessageHandlerAdapter;
 import org.springframework.integration.router.MessageRouter;
+import org.springframework.integration.util.IntegrationReactiveUtils;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
@@ -89,7 +89,7 @@ public class ReactiveStreamsConsumer extends AbstractEndpoint implements Integra
 					"it doesn't forward messages sent to it. A NullChannel is the end of the flow.");
 		}
 
-		this.publisher = MessageChannelReactiveUtils.toPublisher(inputChannel);
+		this.publisher = IntegrationReactiveUtils.messageChannelToFlux(inputChannel);
 		this.subscriber = subscriber;
 		this.lifecycleDelegate = subscriber instanceof Lifecycle ? (Lifecycle) subscriber : null;
 		if (subscriber instanceof MessageHandlerSubscriber) {
@@ -115,7 +115,7 @@ public class ReactiveStreamsConsumer extends AbstractEndpoint implements Integra
 		this.inputChannel = inputChannel;
 		this.handler = new ReactiveMessageHandlerAdapter(reactiveMessageHandler);
 		this.reactiveMessageHandler = reactiveMessageHandler;
-		this.publisher = MessageChannelReactiveUtils.toPublisher(inputChannel);
+		this.publisher = IntegrationReactiveUtils.messageChannelToFlux(inputChannel);
 		this.subscriber = null;
 		this.lifecycleDelegate =
 				reactiveMessageHandler instanceof Lifecycle ? (Lifecycle) reactiveMessageHandler : null;
@@ -172,16 +172,17 @@ public class ReactiveStreamsConsumer extends AbstractEndpoint implements Integra
 		else if (this.subscriber != null) {
 			this.subscription =
 					Flux.from(this.publisher)
-							.doOnComplete(this.subscriber::onComplete)
-							.doOnSubscribe(this.subscriber::onSubscribe)
 							.subscribe((data) -> {
-								try {
-									this.subscriber.onNext(data);
-								}
-								catch (Exception ex) {
-									this.errorHandler.handleError(ex);
-								}
-							});
+										try {
+											this.subscriber.onNext(data);
+										}
+										catch (Exception ex) {
+											this.errorHandler.handleError(ex);
+										}
+									},
+									null,
+									this.subscriber::onComplete,
+									this.subscriber::onSubscribe);
 		}
 	}
 

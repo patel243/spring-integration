@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2019 the original author or authors.
+ * Copyright 2013-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -36,9 +37,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 
 import org.apache.commons.io.FileUtils;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -59,6 +59,7 @@ import org.springframework.integration.sftp.server.PathMovedEvent;
 import org.springframework.integration.sftp.server.PathRemovedEvent;
 import org.springframework.integration.sftp.server.SessionClosedEvent;
 import org.springframework.integration.sftp.server.SessionOpenedEvent;
+import org.springframework.integration.sftp.session.DefaultSftpSessionFactory;
 import org.springframework.integration.sftp.session.SftpRemoteFileTemplate;
 import org.springframework.integration.support.MessageBuilder;
 import org.springframework.integration.test.util.TestUtils;
@@ -68,7 +69,7 @@ import org.springframework.messaging.MessagingException;
 import org.springframework.messaging.PollableChannel;
 import org.springframework.messaging.support.GenericMessage;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.junit4.SpringRunner;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.util.FileCopyUtils;
 
 import com.jcraft.jsch.ChannelSftp;
@@ -80,7 +81,7 @@ import com.jcraft.jsch.ChannelSftp.LsEntry;
  *
  * @since 3.0
  */
-@RunWith(SpringRunner.class)
+@SpringJUnitConfig
 @DirtiesContext
 public class SftpServerOutboundTests extends SftpTestSupport {
 
@@ -135,7 +136,7 @@ public class SftpServerOutboundTests extends SftpTestSupport {
 	@Autowired
 	private SftpRemoteFileTemplate template;
 
-	@Before
+	@BeforeEach
 	public void setup() {
 		this.config.targetLocalDirectoryName = getTargetLocalDirectoryName();
 	}
@@ -559,6 +560,27 @@ public class SftpServerOutboundTests extends SftpTestSupport {
 		LsEntry[] files = template.execute(session -> session.list("sftpTarget/appending.txt"));
 		assertThat(files.length).isEqualTo(1);
 		assertThat(files[0].getAttrs().getSize()).isEqualTo(6);
+	}
+
+	@Test
+	public void testSessionExists() throws IOException {
+		DefaultSftpSessionFactory sessionFactory = new DefaultSftpSessionFactory();
+		sessionFactory.setHost("localhost");
+		sessionFactory.setPort(port);
+		sessionFactory.setUser("foo");
+		sessionFactory.setPassword("foo");
+		sessionFactory.setAllowUnknownKeys(true);
+		Session<LsEntry> session = sessionFactory.getSession();
+
+		assertThat(session.exists("sftpSource")).isTrue();
+		assertThat(session.exists("notExist")).isFalse();
+
+		session.close();
+
+		assertThatExceptionOfType(UncheckedIOException.class)
+				.isThrownBy(() -> session.exists("any"))
+				.withRootCauseInstanceOf(IOException.class)
+				.withStackTraceContaining("Pipe closed");
 	}
 
 	@SuppressWarnings("unused")

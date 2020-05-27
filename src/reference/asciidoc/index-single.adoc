@@ -23,6 +23,8 @@ include::./messaging-endpoints.adoc[]
 
 include::./dsl.adoc[]
 
+include::./kotlin-dsl.adoc[]
+
 include::./system-management.adoc[]
 
 include::./endpoint-summary.adoc[]
@@ -58,6 +60,8 @@ include::./redis.adoc[]
 include::./resource.adoc[]
 
 include::./rmi.adoc[]
+
+include::./rsocket.adoc[]
 
 include::./sftp.adoc[]
 

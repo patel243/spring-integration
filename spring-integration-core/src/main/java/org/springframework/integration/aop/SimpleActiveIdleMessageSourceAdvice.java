@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,11 @@ import org.springframework.messaging.Message;
  * @since 4.2
  *
  * @see DynamicPeriodicTrigger
+ *
+ * @deprecated since 5.3 in favor of {@link SimpleActiveIdleReceiveMessageAdvice} with the same
+ * (but more common) functionality.
  */
+@Deprecated
 public class SimpleActiveIdleMessageSourceAdvice extends AbstractMessageSourceAdvice {
 
 	private final DynamicPeriodicTrigger trigger;

@@ -25,9 +25,9 @@ The following example shows how to the `<request-handler-advice-chain/>` element
     url-expression="'http://localhost/test1'"
     request-channel="requests"
     reply-channel="nextChannel">
-    <int:request-handler-advice-chain>
+    <int-http:request-handler-advice-chain>
         <ref bean="myRetryAdvice" />
-    </request-handler-advice-chain>
+    </int-http:request-handler-advice-chain>
 </int-http:outbound-gateway>
 ----
 
@@ -56,6 +56,7 @@ In addition to providing the general mechanism to apply AOP advice classes, Spri
 * `ExpressionEvaluatingRequestHandlerAdvice` (described in <<expression-advice>>)
 * `RateLimiterRequestHandlerAdvice` (described in <<rate-limiter-advice>>)
 * `CacheRequestHandlerAdvice` (described in <<cache-advice>>)
+* `ReactiveRequestHandlerAdvice` (described in <<reactive-advice>>)
 
 [[retry-advice]]
 ===== Retry Advice
@@ -109,7 +110,7 @@ The following example uses `RetryTemplate` and shows its `DEBUG` output:
 <int:service-activator input-channel="input" ref="failer" method="service">
     <int:request-handler-advice-chain>
         <bean class="o.s.i.handler.advice.RequestHandlerRetryAdvice"/>
-    </request-handler-advice-chain>
+    </int:request-handler-advice-chain>
 </int:service-activator>
 
 DEBUG [task-scheduler-2]preSend on channel 'input', message: [Payload=...]
@@ -138,8 +139,8 @@ The following example adds a `RecoveryCallback` to the preceding example and use
                 </bean>
             </property>
         </bean>
-    </request-handler-advice-chain>
-</int:int:service-activator>
+    </int:request-handler-advice-chain>
+</int:service-activator>
 
 DEBUG [task-scheduler-2]preSend on channel 'input', message: [Payload=...]
 DEBUG [task-scheduler-2]Retry: count=0
@@ -172,7 +173,7 @@ The following listing shows the example and its `DEBUG` output:
             </property>
             <property name="retryTemplate" ref="retryTemplate" />
         </bean>
-    </request-handler-advice-chain>
+    </int:request-handler-advice-chain>
 </int:service-activator>
 
 <bean id="retryTemplate" class="org.springframework.retry.support.RetryTemplate">
@@ -215,8 +216,8 @@ Starting with version 4.0, the preceding configuration can be greatly simplified
 ----
 <int:service-activator input-channel="input" ref="failer" method="service">
     <int:request-handler-advice-chain>
-        <bean ref="retrier" />
-    </request-handler-advice-chain>
+        <ref bean="retrier" />
+    </int:request-handler-advice-chain>
 </int:service-activator>
 
 <int:handler-retry-advice id="retrier" max-attempts="4" recovery-channel="myErrorChannel">
@@ -236,7 +237,7 @@ You can also define the advice directly within the chain, as the following examp
         <int:retry-advice id="retrier" max-attempts="4" recovery-channel="myErrorChannel">
             <int:exponential-back-off initial="1000" multiplier="5.0" maximum="60000" />
         </int:retry-advice>
-    </request-handler-advice-chain>
+    </int:request-handler-advice-chain>
 </int:service-activator>
 ----
 ====
@@ -514,6 +515,7 @@ This configuration functionality is similar to Spring Framework's `@CacheConfig`
 If a `CacheManager` is not provided, a single bean is resolved by default from the `BeanFactory` in the `CacheAspectSupport`.
 
 The following example configures two advices with different set of caching operations:
+
 ====
 [source, java]
 ----
@@ -548,6 +550,26 @@ public Message<?> service(Message<?> message) {
 }
 ----
 ====
+
+[[reactive-advice]]
+==== Reactive Advice
+
+Starting with version 5.3, a `ReactiveRequestHandlerAdvice` can be used for request message handlers producing a `Mono` replies.
+A `BiFunction<Message<?>, Mono<?>, Publisher<?>>` has to be provided for this advice and it is called from the `Mono.transform()` operator on a reply produced by the intercepted `handleRequestMessage()` method implementation.
+Typically such a `Mono` customization is necessary when we would like to control network fluctuations via `timeout()`, `retry()` and similar support operators.
+For example when we can an HTTP request over WebFlux client, we could use below configuration to not wait for response more than 5 seconds:
+
+====
+[source, java]
+----
+.handle(WebFlux.outboundGateway("https://somehost/"),
+                       e -> e.customizeMonoReply((message, mono) -> mono.timeout(Duration.ofSeconds(5))));
+----
+====
+
+The `message` argument is the request message for the message handler and can be used to determine request-scope attributes.
+The `mono` argument is the result of this message handler's `handleRequestMessage()` method implementation.
+A nested `Mono.transform()` can also be called from this function to apply, for example, a https://spring.io/projects/spring-cloud-circuitbreaker[Reactive Circuit Breaker].
 
 [[custom-advice]]
 ==== Custom Advice Classes
@@ -647,7 +669,7 @@ Consider the following configuration:
 <some-reply-producing-endpoint ... >
     <int:request-handler-advice-chain>
         <tx:advice ... />
-        <bean ref="myHandleMessageAdvice" />
+        <ref bean="myHandleMessageAdvice" />
     </int:request-handler-advice-chain>
 </some-reply-producing-endpoint>
 ----
@@ -660,6 +682,11 @@ To retain the order, you should follow the standard https://docs.spring.io/sprin
 Note that, in that case, the entire downstream flow is within the transaction scope.
 
 In the case of a `MessageHandler` that does not return a response, the advice chain order is retained.
+
+Starting with version 5.3, the `HandleMessageAdviceAdapter` is present to let apply any existing `MethodInterceptor` for the `MessageHandler.handleMessage()` and, therefore, whole sub-flow.
+For example a `RetryOperationsInterceptor` could be applied for the whole sub-flow starting from some endpoint, which is not possible by default because consumer endpoint applies advices only for the `AbstractReplyProducingMessageHandler.RequestHandler.handleRequestMessage()`.
+Starting with version 5.3, the `HandleMessageAdviceAdapter` is provided to apply any `MethodInterceptor` for the `MessageHandler.handleMessage()` method and, therefore, the whole sub-flow.
+For example, a `RetryOperationsInterceptor` could be applied to the whole sub-flow starting from some endpoint; this is not possible, by default, because the consumer endpoint applies advices only to the `AbstractReplyProducingMessageHandler.RequestHandler.handleRequestMessage()`.
 
 [[tx-handle-message-advice]]
 ==== Transaction Support
@@ -678,7 +705,7 @@ The following example shows `<transactional>` in use:
 </int-rmi:outbound-gateway>
 
 <bean id="transactionManager" class="org.mockito.Mockito" factory-method="mock">
-    <constructor-arg value="org.springframework.transaction.PlatformTransactionManager"/>
+    <constructor-arg value="org.springframework.transaction.TransactionManager"/>
 </bean>
 ----
 
@@ -845,6 +872,13 @@ See the https://docs.spring.io/spring-integration/api/org/springframework/integr
 You can also customize the `value` for `ConcurrentMetadataStore` by using an additional `MessageProcessor`.
 By default, `MetadataStoreSelector` uses the `timestamp` message header.
 
+Normally, the selector selects a message for acceptance if there is no existing value for the key.
+In some cases, it is useful to compare the current and new values for a key, to determine whether the message should be accepted.
+Starting with version 5.3, the `compareValues` property is provided which references a `BiPredicate<String, String>`; the first parameter is the old value; return `true` to accept the message and replace the old value with the new value in the `MetadataStore`.
+This can be useful to reduce the number of keys; for example, when processing lines in a file, you can store the file name in the key and the current line number in the value.
+Then, after a restart, you can skip lines that have already been processed.
+See <<./file.adoc#idempotent-file-splitter,Idempotent Downstream Processing a Split File>> for an example.
+
 For convenience, the `MetadataStoreSelector` options are configurable directly on the `<idempotent-receiver>` component.
 The following listing shows all the possible attributes:
 
@@ -861,7 +895,8 @@ The following listing shows all the possible attributes:
         key-expression=""  <7>
         value-strategy=""  <8>
         value-expression=""  <9>
-        throw-exception-on-rejection="" />  <10>
+        compare-values="" <10>
+        throw-exception-on-rejection="" />  <11>
 ----
 
 <1> The ID of the `IdempotentReceiverInterceptor` bean.
@@ -901,7 +936,8 @@ Used by the underlying `MetadataStoreSelector`.
 Evaluates a `value` for the `idempotentKey` by using the request message as the evaluation context root object.
 Mutually exclusive with `selector` and `value-strategy`.
 By default, the 'MetadataStoreSelector' uses the 'timestamp' message header as the metadata 'value'.
-<10> Whether to throw an exception if the `IdempotentReceiverInterceptor` rejects the message.
+<10> A reference to a `BiPredicate<String, String>` bean which allows you to optionally select a message by comparing the old and new values for the key; `null` by default.
+<11> Whether to throw an exception if the `IdempotentReceiverInterceptor` rejects the message.
 Defaults to `false`.
 It is applied regardless of whether or not a `discard-channel` is provided.
 ====

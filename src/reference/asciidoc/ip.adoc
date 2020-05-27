@@ -536,6 +536,27 @@ The following example shows how to configure a failover client connection factor
 
 NOTE: When using the failover connection factory, the `singleUse` property must be consistent between the factory itself and the list of factories it is configured to use.
 
+The connection factory has two properties related to failing back, when used with a shared connection (`singleUse=false`):
+
+* `refreshSharedInterval`
+* `closeOnRefresh`
+
+Consider the following scenario based on the above configuration:
+Let's say `clientFactory1` cannot establish a connection but `clientFactory2` can.
+When the `failCF` `getConnection()` method is called after the `refreshSharedInterval` has passed, we will again attempt to connect using `clientFactory1`; if successful, the connection to `clientFactory2` will be closed.
+If `closeOnRefresh` is `false`, the "old" connection will remain open and may be reused in future if the first factory fails once more.
+
+Set `refreshSharedInterval` to only attempt to reconnect with the first factory after that time has expired; setting it to `Long.MAX_VALUE` (default) if you only want to fail back to the first factory when the current connection fails.
+
+Set `closeOnRefresh` to close the "old" connection after a refresh actually creates a new connection.
+
+IMPORTANT: These properties do not apply if any of the delegate factories is a `CachingClientConnectionFactory` because the connection caching is handled there; in that case the list of connection factories will always be consulted to get a connection.
+
+Starting with version 5.3, these default to `Long.MAX_VALUE` and `true` so the factory only attempts to fail back when the current connection fails.
+To revert to the default behavior of previous versions, set them to `0` and `false`.
+
+Also see <<testing-connections>>.
+
 [[tcp-affinity-cf]]
 ==== TCP Thread Affinity Connection Factory
 
@@ -570,6 +591,64 @@ public TcpOutboundGateway outGate() {
     outGate.setReplyChannelName("toString");
     return outGate;
 }
+----
+====
+
+[[testing-connections]]
+=== Testing Connections
+
+In some scenarios, it can be useful to send some kind of health-check request when a connection is first opened.
+One such scenario might be when using a <<failover-cf>> so that we can fail over if the selected server allowed a connection to be opened but reports that it is not healthy.
+
+In order to support this feature, add a `connectionTest` to the client connection factory.
+
+====
+[source, java]
+----
+/**
+ * Set a {@link Predicate} that will be invoked to test a new connection; return true
+ * to accept the connection, false the reject.
+ * @param connectionTest the predicate.
+ * @since 5.3
+ */
+public void setConnectionTest(@Nullable Predicate<TcpConnectionSupport> connectionTest) {
+    this.connectionTest = connectionTest;
+}
+----
+====
+
+To test the connection, attach a temporary listener to the connection within the test.
+If the test fails, the connection is closed and an exception thrown.
+When used with the <<failover-cf>> this triggers trying the next server.
+
+IMPORTANT: Only the first reply from the server will go to the test listener.
+
+In the following example, the server is considered healthy if the server replies `PONG` when we send `PING`.
+
+====
+[source, java]
+----
+Message<String> ping = new GenericMessage<>("PING");
+byte[] pong = "PONG".getBytes();
+clientFactory.setConnectionTest(conn -> {
+    CountDownLatch latch = new CountDownLatch(1);
+    AtomicBoolean result = new AtomicBoolean();
+    conn.registerTestListener(msg -> {
+        if (Arrays.equals(pong, (byte[]) msg.getPayload())) {
+            result.set(true);
+        }
+        latch.countDown();
+        return false;
+    });
+    conn.send(ping);
+    try {
+        latch.await(10, TimeUnit.SECONDS);
+    }
+    catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+    }
+    return result.get();
+});
 ----
 ====
 
@@ -822,6 +901,14 @@ remote-timeout-expression="headers['timeout']" -->
 Starting with version 5.2, the outbound gateway can be configured with the property `closeStreamAfterSend`.
 If the connection factory is configured for `single-use` (a new connection for each request/reply) the gateway will close the output stream; this signals EOF to the server.
 This is useful if the server uses the EOF to determine the end of message, rather than some delimiter in the stream, but leaves the connection open in order to receive the reply.
+
+Normally, the calling thread will block in the gateway, waiting for the reply (or a timeout).
+Starting with version 5.3, you can set the `async` property on the gateway and the sending thread is released to do other work.
+The reply (or error) will be sent on the receiving thread.
+This only applies when using the `TcpNetClientConnectionFactory`, it is ignored when using NIO because there is a race condition whereby a socket error that occurs after the reply is received can be passed to the gateway before the reply.
+
+IMPORTANT: When using a shared connection (`singleUse=false`), a new request, while another is in process, will be blocked until the current reply is received.
+Consider using the `CachingClientConnectionFactory` if you wish to support concurrent requests on a pool of long-lived connections.
 
 [[ip-correlation]]
 === TCP Message Correlation
@@ -1963,6 +2050,10 @@ Mutually exclusive with `remote-timeout`.
 |
 | The time in milliseconds for which the gateway waits when sending the reply to the reply-channel.
 Only applies if the reply-channel might block (such as a bounded QueueChannel that is currently full).
+
+| `async`
+|
+| Release the sending thread after the send; the reply (or error) will be sent on the receiving thread.
 |===
 
 .IP Message Headers

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 the original author or authors.
+ * Copyright 2018-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ import org.springframework.integration.annotation.Transformer
 import org.springframework.integration.channel.DirectChannel
 import org.springframework.integration.channel.QueueChannel
 import org.springframework.integration.config.EnableIntegration
-import org.springframework.integration.dsl.IntegrationFlows
+import org.springframework.integration.dsl.integrationFlow
 import org.springframework.integration.endpoint.SourcePollingChannelAdapter
 import org.springframework.integration.gateway.GatewayProxyFactoryBean
 import org.springframework.messaging.Message
@@ -179,16 +179,17 @@ class FunctionsTests {
 
 		@Bean
 		fun flowFromSupplier() =
-				IntegrationFlows.from<String>({ "" }) { e -> e.poller { p -> p.fixedDelay(10).maxMessagesPerPoll(1) } }
-						.transform<String, String> { "blank" }
-						.channel { c -> c.queue("fromSupplierQueue") }
-						.get()
+				integrationFlow({ "" }, { poller { it.fixedDelay(10).maxMessagesPerPoll(1) } }) {
+					transform<String> { "blank" }
+					channel { queue("fromSupplierQueue") }
+				}
 
 		@Bean
 		fun monoFunctionGateway() =
-				IntegrationFlows.from(MonoFunction::class.java) { gateway -> gateway.proxyDefaultMethods(true) }
-						.handle<String>({ p, _ -> Mono.just(p).map(String::toUpperCase) }) { e -> e.async(true) }
-						.get()
+				integrationFlow<MonoFunction>({ proxyDefaultMethods(true) }) {
+					handle<String>({ p, _ -> Mono.just(p).map(String::toUpperCase) }) { async(true) }
+				}
+
 	}
 
 	interface MonoFunction : Function<String, Mono<Message<*>>>

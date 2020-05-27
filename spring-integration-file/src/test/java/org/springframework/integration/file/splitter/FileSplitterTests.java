@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Date;
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -49,6 +50,11 @@ import org.springframework.integration.channel.QueueChannel;
 import org.springframework.integration.config.EnableIntegration;
 import org.springframework.integration.file.FileHeaders;
 import org.springframework.integration.file.splitter.FileSplitter.FileMarker;
+import org.springframework.integration.handler.advice.IdempotentReceiverInterceptor;
+import org.springframework.integration.json.JsonPathUtils;
+import org.springframework.integration.metadata.ConcurrentMetadataStore;
+import org.springframework.integration.metadata.SimpleMetadataStore;
+import org.springframework.integration.selector.MetadataStoreSelector;
 import org.springframework.integration.support.json.JsonObjectMapper;
 import org.springframework.integration.support.json.JsonObjectMapperProvider;
 import org.springframework.messaging.Message;
@@ -90,6 +96,12 @@ public class FileSplitterTests {
 	@Autowired
 	private PollableChannel output;
 
+	@Autowired
+	private MetadataStoreSelector selector;
+
+	@Autowired
+	private ConcurrentMetadataStore store;
+
 	@BeforeAll
 	static void setup(@TempDir File tempDir) throws IOException {
 		file = new File(tempDir, "foo.txt");
@@ -104,12 +116,19 @@ public class FileSplitterTests {
 		assertThat(receive).isNotNull(); //HelloWorld
 		assertThat(receive.getPayload()).isEqualTo("HelloWorld");
 		assertThat(receive.getHeaders().get(IntegrationMessageHeaderAccessor.SEQUENCE_SIZE)).isEqualTo(2);
+		assertThat(receive.getHeaders().get(IntegrationMessageHeaderAccessor.SEQUENCE_NUMBER)).isEqualTo(1);
+		assertThat(this.selector.accept(receive)).isTrue();
+		assertThat(this.store.get(file.getAbsolutePath())).isEqualTo("1");
 		receive = this.output.receive(10000);
 		assertThat(receive).isNotNull();  //äöüß
 		assertThat(receive.getPayload()).isEqualTo("äöüß");
 		assertThat(receive.getHeaders().get(FileHeaders.ORIGINAL_FILE)).isEqualTo(file);
 		assertThat(receive.getHeaders().get(FileHeaders.FILENAME)).isEqualTo(file.getName());
+		assertThat(receive.getHeaders().get(IntegrationMessageHeaderAccessor.SEQUENCE_NUMBER)).isEqualTo(2);
 		assertThat(this.output.receive(1)).isNull();
+		assertThat(this.selector.accept(receive)).isTrue();
+		assertThat(this.store.get(file.getAbsolutePath())).isEqualTo("2");
+		assertThat(this.selector.accept(receive)).isFalse();
 
 		this.input1.send(new GenericMessage<>(file.getAbsolutePath()));
 		receive = this.output.receive(10000);
@@ -231,6 +250,7 @@ public class FileSplitterTests {
 	}
 
 	@Test
+	@SuppressWarnings("unchecked")
 	void testMarkersJson() throws Exception {
 		JsonObjectMapper<?, ?> objectMapper = JsonObjectMapperProvider.newInstance();
 		QueueChannel outputChannel = new QueueChannel();
@@ -243,7 +263,8 @@ public class FileSplitterTests {
 		assertThat(received.getHeaders().get(FileHeaders.MARKER)).isEqualTo("START");
 		assertThat(received.getPayload()).isInstanceOf(String.class);
 		String payload = (String) received.getPayload();
-		assertThat(payload).contains("\"mark\":\"START\",\"lineCount\":0");
+		assertThat((List<String>) JsonPathUtils.evaluate(payload, "$..mark")).hasSize(1).contains("START");
+		assertThat((List<Integer>) JsonPathUtils.evaluate(payload, "$..lineCount")).hasSize(1).contains(0);
 		FileMarker fileMarker = objectMapper.fromJson(payload, FileSplitter.FileMarker.class);
 		assertThat(fileMarker.getMark()).isEqualTo(FileSplitter.FileMarker.Mark.START);
 		assertThat(fileMarker.getFilePath()).isEqualTo(file.getAbsolutePath());
@@ -361,7 +382,7 @@ public class FileSplitterTests {
 		splitter.setOutputChannel(outputChannel);
 		FileReader fileReader = Mockito.spy(new FileReader(file));
 		try {
-			splitter.handleMessage(new GenericMessage<Reader>(fileReader));
+			splitter.handleMessage(new GenericMessage<>(fileReader));
 		}
 		catch (RuntimeException e) {
 			// ignore
@@ -394,6 +415,25 @@ public class FileSplitterTests {
 			fileSplitter.setCharset(Charset.defaultCharset());
 			fileSplitter.setOutputChannel(output());
 			return fileSplitter;
+		}
+
+		@Bean
+		public IdempotentReceiverInterceptor idempotentReceiverInterceptor() {
+			return new IdempotentReceiverInterceptor(selector());
+		}
+
+		@Bean
+		public MetadataStoreSelector selector() {
+			return new MetadataStoreSelector(
+					message -> message.getHeaders().get(FileHeaders.ORIGINAL_FILE, File.class).getAbsolutePath(),
+					message -> message.getHeaders().get(IntegrationMessageHeaderAccessor.SEQUENCE_NUMBER).toString(),
+					store())
+					.compareValues((oldVal, newVal) -> Integer.parseInt(oldVal) < Integer.parseInt(newVal));
+		}
+
+		@Bean
+		public ConcurrentMetadataStore store() {
+			return new SimpleMetadataStore();
 		}
 
 	}

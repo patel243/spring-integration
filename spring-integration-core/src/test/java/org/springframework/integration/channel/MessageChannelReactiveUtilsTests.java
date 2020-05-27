@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 the original author or authors.
+ * Copyright 2019-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,9 +19,11 @@ package org.springframework.integration.channel;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
+import org.springframework.integration.util.IntegrationReactiveUtils;
 import org.springframework.messaging.support.GenericMessage;
 
 import reactor.core.Disposable;
@@ -44,7 +46,7 @@ class MessageChannelReactiveUtilsTests {
 		try {
 			DirectChannel channel = new DirectChannel();
 			int initialRequest = 10;
-			StepVerifier.create(MessageChannelReactiveUtils.toPublisher(channel), initialRequest)
+			StepVerifier.create(IntegrationReactiveUtils.messageChannelToFlux(channel), initialRequest)
 					.expectSubscription()
 					.then(() -> {
 						compositeDisposable.add(
@@ -73,9 +75,10 @@ class MessageChannelReactiveUtilsTests {
 		channel.setCountsEnabled(true);
 
 		Disposable.Composite compositeDisposable = Disposables.composite();
+		AtomicInteger sendCount = new AtomicInteger();
 		try {
 			int initialRequest = 10;
-			StepVerifier.create(MessageChannelReactiveUtils.toPublisher(channel), initialRequest)
+			StepVerifier.create(IntegrationReactiveUtils.messageChannelToFlux(channel), initialRequest)
 					.expectSubscription()
 					.then(() ->
 							compositeDisposable.add(
@@ -83,6 +86,7 @@ class MessageChannelReactiveUtilsTests {
 										while (true) {
 											if (channel.getSubscriberCount() > 0) {
 												channel.send(new GenericMessage<>("foo"));
+												sendCount.incrementAndGet();
 											}
 										}
 									})
@@ -96,7 +100,7 @@ class MessageChannelReactiveUtilsTests {
 			compositeDisposable.dispose();
 		}
 
-		assertThat(channel.getMetrics().getSendCountLong())
+		assertThat(sendCount.get())
 				.as("produced")
 				.isLessThanOrEqualTo(Queues.SMALL_BUFFER_SIZE);
 	}
