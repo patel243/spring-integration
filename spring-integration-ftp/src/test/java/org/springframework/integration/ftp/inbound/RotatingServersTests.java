@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2020 the original author or authors.
+ * Copyright 2018-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,21 +29,23 @@ import java.util.stream.Collectors;
 
 import org.apache.commons.net.ftp.FTPFile;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.integration.StaticMessageHeaderAccessor;
 import org.springframework.integration.channel.QueueChannel;
 import org.springframework.integration.config.EnableIntegration;
 import org.springframework.integration.dsl.IntegrationFlow;
 import org.springframework.integration.dsl.IntegrationFlows;
 import org.springframework.integration.dsl.MessageChannels;
 import org.springframework.integration.dsl.Pollers;
-import org.springframework.integration.dsl.StandardIntegrationFlow;
+import org.springframework.integration.endpoint.SourcePollingChannelAdapter;
+import org.springframework.integration.file.FileHeaders;
 import org.springframework.integration.file.remote.aop.RotatingServerAdvice;
 import org.springframework.integration.file.remote.aop.RotationPolicy;
 import org.springframework.integration.file.remote.session.CachingSessionFactory;
@@ -58,6 +60,7 @@ import org.springframework.integration.ftp.dsl.Ftp;
 import org.springframework.integration.ftp.filters.FtpPersistentAcceptOnceFileListFilter;
 import org.springframework.integration.ftp.session.FtpRemoteFileTemplate;
 import org.springframework.integration.metadata.SimpleMetadataStore;
+import org.springframework.messaging.Message;
 
 /**
  * @author Gary Russell
@@ -68,10 +71,10 @@ import org.springframework.integration.metadata.SimpleMetadataStore;
  */
 public class RotatingServersTests extends FtpTestSupport {
 
-	private static String tmpDir = getLocalTempFolder().getAbsolutePath() + File.separator + "multiSF";
+	private static final String TMP_DIR = getLocalTempFolder().getAbsolutePath() + File.separator + "multiSF";
 
-	@BeforeAll
-	public static void setup() {
+	@BeforeEach
+	public void setup() {
 		FtpRemoteFileTemplate rft = new FtpRemoteFileTemplate(sessionFactory());
 		rft.execute(s -> {
 			s.mkdir("foo");
@@ -89,78 +92,152 @@ public class RotatingServersTests extends FtpTestSupport {
 	}
 
 	@BeforeEach
+	public void extraSetup(TestInfo info) {
+		if (info.getTestMethod().get().getName().equals("testFairStreaming")) {
+			FtpRemoteFileTemplate rft = new FtpRemoteFileTemplate(sessionFactory());
+			rft.execute(s -> {
+				ByteArrayInputStream bais = new ByteArrayInputStream("foo".getBytes());
+				// 2 files per server, remove empty dirs
+				s.write(bais, "foo/f4");
+				s.write(bais, "baz/f5");
+				s.write(bais, "fiz/f6");
+				s.rmdir("bar");
+				s.rmdir("qux");
+				s.rmdir("buz");
+				return null;
+			});
+		}
+	}
+
+	@BeforeEach
 	@AfterEach
 	public void clean(TestInfo info) {
-		recursiveDelete(new File(tmpDir), info);
+		recursiveDelete(new File(TMP_DIR), info);
+	}
+
+	@AfterEach
+	public void extraCleanUp(TestInfo info) {
+		FtpRemoteFileTemplate rft = new FtpRemoteFileTemplate(sessionFactory());
+		rft.execute(s -> {
+			if (info.getTestMethod().get().getName().equals("testFairStreaming")) {
+				s.remove("foo/f4");
+				s.remove("baz/f5");
+				s.remove("fiz/f6");
+			}
+			s.remove("foo/f1");
+			s.remove("baz/f2");
+			s.remove("fiz/f3");
+			return null;
+		});
 	}
 
 	@Test
 	public void testStandard() throws Exception {
-		AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext(StandardConfig.class);
-		StandardConfig config = ctx.getBean(StandardConfig.class);
-		ctx.getBean(StandardIntegrationFlow.class).stop();
-		assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
-		List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
-		assertThat(sfCalls).containsExactly(1, 1, 1, 2, 2, 2, 3, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1);
-		File f1 = new File(tmpDir + File.separator + "standard" + File.separator + "f1");
-		assertThat(f1.exists()).isTrue();
-		File f2 = new File(tmpDir + File.separator + "standard" + File.separator + "f2");
-		assertThat(f2.exists()).isTrue();
-		File f3 = new File(tmpDir + File.separator + "standard" + File.separator + "f3");
-		assertThat(f3.exists()).isTrue();
-		assertThat(ctx.getBean("files", QueueChannel.class).getQueueSize()).isEqualTo(3);
-		ctx.close();
+		try (AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext(StandardConfig.class)) {
+			StandardConfig config = ctx.getBean(StandardConfig.class);
+			assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
+			ctx.getBean(SourcePollingChannelAdapter.class).stop();
+			List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
+			assertThat(sfCalls).containsExactly(1, 1, 1, 2, 2, 2, 3, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1);
+			File f1 = new File(TMP_DIR + File.separator + "standard" + File.separator + "f1");
+			assertThat(f1.exists()).isTrue();
+			File f2 = new File(TMP_DIR + File.separator + "standard" + File.separator + "f2");
+			assertThat(f2.exists()).isTrue();
+			File f3 = new File(TMP_DIR + File.separator + "standard" + File.separator + "f3");
+			assertThat(f3.exists()).isTrue();
+			assertThat(ctx.getBean("files", QueueChannel.class).getQueueSize()).isEqualTo(3);
+		}
 	}
 
 	@Test
 	public void testFair() throws Exception {
-		AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext(FairConfig.class);
-		StandardConfig config = ctx.getBean(StandardConfig.class);
-		ctx.getBean(StandardIntegrationFlow.class).stop();
-		assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
-		List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
-		assertThat(sfCalls).containsExactly(1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3);
-		File f1 = new File(tmpDir + File.separator + "fair" + File.separator + "f1");
-		assertThat(f1.exists()).isTrue();
-		File f2 = new File(tmpDir + File.separator + "fair" + File.separator + "f2");
-		assertThat(f2.exists()).isTrue();
-		File f3 = new File(tmpDir + File.separator + "fair" + File.separator + "f3");
-		assertThat(f3.exists()).isTrue();
-		assertThat(ctx.getBean("files", QueueChannel.class).getQueueSize()).isEqualTo(3);
-		ctx.close();
+		try (AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext(FairConfig.class)) {
+			StandardConfig config = ctx.getBean(StandardConfig.class);
+			assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
+			ctx.getBean(SourcePollingChannelAdapter.class).stop();
+			List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
+			assertThat(sfCalls).containsExactly(1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3);
+			File f1 = new File(TMP_DIR + File.separator + "fair" + File.separator + "f1");
+			assertThat(f1.exists()).isTrue();
+			File f2 = new File(TMP_DIR + File.separator + "fair" + File.separator + "f2");
+			assertThat(f2.exists()).isTrue();
+			File f3 = new File(TMP_DIR + File.separator + "fair" + File.separator + "f3");
+			assertThat(f3.exists()).isTrue();
+			assertThat(ctx.getBean("files", QueueChannel.class).getQueueSize()).isEqualTo(3);
+		}
 	}
 
 	@Test
 	public void testVariableLocalDir() throws Exception {
-		AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext(VariableLocalConfig.class);
-		StandardConfig config = ctx.getBean(StandardConfig.class);
-		assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
-		ctx.getBean(StandardIntegrationFlow.class).stop();
-		List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
-		assertThat(sfCalls).containsExactly(1, 1, 1, 2, 2, 2, 3, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1);
-		File f1 = new File(tmpDir + File.separator + "variable" + File.separator + "foo" + File.separator + "f1");
-		assertThat(f1.exists()).isTrue();
-		File f2 = new File(tmpDir + File.separator + "variable" + File.separator + "baz" + File.separator + "f2");
-		assertThat(f2.exists()).isTrue();
-		File f3 = new File(tmpDir + File.separator + "variable" + File.separator + "fiz" + File.separator + "f3");
-		assertThat(f3.exists()).isTrue();
-		assertThat(ctx.getBean("files", QueueChannel.class).getQueueSize()).isEqualTo(3);
-		ctx.close();
+		try (ConfigurableApplicationContext ctx = new AnnotationConfigApplicationContext(VariableLocalConfig.class)) {
+			StandardConfig config = ctx.getBean(StandardConfig.class);
+			assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
+			ctx.getBean(SourcePollingChannelAdapter.class).stop();
+			List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
+			assertThat(sfCalls).containsExactly(1, 1, 1, 2, 2, 2, 3, 3, 3, 1, 1, 2, 2, 3, 3, 1, 1);
+			File f1 = new File(TMP_DIR + File.separator + "variable" + File.separator + "foo" + File.separator + "f1");
+			assertThat(f1.exists()).isTrue();
+			File f2 = new File(TMP_DIR + File.separator + "variable" + File.separator + "baz" + File.separator + "f2");
+			assertThat(f2.exists()).isTrue();
+			File f3 = new File(TMP_DIR + File.separator + "variable" + File.separator + "fiz" + File.separator + "f3");
+			assertThat(f3.exists()).isTrue();
+			assertThat(ctx.getBean("files", QueueChannel.class).getQueueSize()).isEqualTo(3);
+		}
 	}
 
 	@Test
 	public void testStreaming() throws Exception {
-		AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext(StreamingConfig.class);
-		StandardConfig config = ctx.getBean(StandardConfig.class);
-		ctx.getBean(StandardIntegrationFlow.class).stop();
-		assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
-		List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
-		// there's an extra getSession() with this adapter in listFiles
-		assertThat(sfCalls).containsExactly(1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 1, 1, 2, 2, 3);
-		assertThat(ctx.getBean("files", QueueChannel.class).getQueueSize()).isEqualTo(3);
-		ctx.close();
+		try (AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext(StreamingConfig.class)) {
+			StandardConfig config = ctx.getBean(StreamingConfig.class);
+			assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
+			ctx.getBean(SourcePollingChannelAdapter.class).stop();
+			List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
+			// there's an extra getSession() with this adapter in listFiles
+			assertThat(sfCalls).containsExactly(1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 1, 1, 2, 2, 3);
+			QueueChannel files = ctx.getBean("files", QueueChannel.class);
+			assertThat(files.getQueueSize()).isEqualTo(3);
+			Message<?> received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f1");
+			received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f2");
+			received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f3");
+		}
 	}
 
+	@Test
+	public void testFairStreaming() throws Exception {
+		try (ConfigurableApplicationContext ctx = new AnnotationConfigApplicationContext(FairStreamingConfig.class)) {
+			StandardConfig config = ctx.getBean(StandardConfig.class);
+			assertThat(config.latch.await(10, TimeUnit.SECONDS)).isTrue();
+			ctx.getBean(SourcePollingChannelAdapter.class).stop();
+			List<Integer> sfCalls = config.sessionSources.stream().limit(17).collect(Collectors.toList());
+			assertThat(sfCalls).containsExactly(1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3, 1, 2, 3, 1, 2);
+			QueueChannel files = ctx.getBean("files", QueueChannel.class);
+			assertThat(files.getQueueSize()).isEqualTo(6);
+			Message<?> received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f1");
+			received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f2");
+			received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f3");
+			received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f4");
+			received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f5");
+			received = files.receive(0);
+			StaticMessageHeaderAccessor.getCloseableResource(received).close();
+			assertThat(received.getHeaders().get(FileHeaders.REMOTE_FILE, String.class)).isEqualTo("f6");
+		}
+	}
 
 	@Configuration
 	@EnableIntegration
@@ -172,13 +249,14 @@ public class RotatingServersTests extends FtpTestSupport {
 
 		@Bean
 		public SessionFactory<FTPFile> factory1() {
-			return new CachingSessionFactory<FTPFile>(rawSessionFactory()) {
+			return new CachingSessionFactory<>(rawSessionFactory()) {
 
 				@Override
 				public Session<FTPFile> getSession() {
+					Session<FTPFile> session = super.getSession();
 					StandardConfig.this.sessionSources.add(1);
 					StandardConfig.this.latch.countDown();
-					return super.getSession();
+					return session;
 				}
 
 			};
@@ -186,13 +264,14 @@ public class RotatingServersTests extends FtpTestSupport {
 
 		@Bean
 		public SessionFactory<FTPFile> factory2() {
-			return new CachingSessionFactory<FTPFile>(rawSessionFactory()) {
+			return new CachingSessionFactory<>(rawSessionFactory()) {
 
 				@Override
 				public Session<FTPFile> getSession() {
+					Session<FTPFile> session = super.getSession();
 					StandardConfig.this.sessionSources.add(2);
 					StandardConfig.this.latch.countDown();
-					return super.getSession();
+					return session;
 				}
 
 			};
@@ -200,13 +279,14 @@ public class RotatingServersTests extends FtpTestSupport {
 
 		@Bean
 		public SessionFactory<FTPFile> factory3() {
-			return new CachingSessionFactory<FTPFile>(rawSessionFactory()) {
+			return new CachingSessionFactory<>(rawSessionFactory()) {
 
 				@Override
 				public Session<FTPFile> getSession() {
+					Session<FTPFile> session = super.getSession();
 					StandardConfig.this.sessionSources.add(3);
 					StandardConfig.this.latch.countDown();
-					return super.getSession();
+					return session;
 				}
 
 			};
@@ -248,13 +328,13 @@ public class RotatingServersTests extends FtpTestSupport {
 							.filter(new FtpPersistentAcceptOnceFileListFilter(new SimpleMetadataStore(), "rotate"))
 							.localDirectory(localDir())
 							.remoteDirectory("."),
-						e -> e.poller(Pollers.fixedDelay(1).advice(advice())))
+					e -> e.poller(Pollers.fixedDelay(1).advice(advice())))
 					.channel(MessageChannels.queue("files"))
 					.get();
 		}
 
 		protected File localDir() {
-			return new File(tmpDir, "standard");
+			return new File(TMP_DIR, "standard");
 		}
 
 	}
@@ -269,8 +349,9 @@ public class RotatingServersTests extends FtpTestSupport {
 
 		@Override
 		protected File localDir() {
-			return new File(tmpDir, "fair");
+			return new File(TMP_DIR, "fair");
 		}
+
 	}
 
 	@Configuration
@@ -281,10 +362,10 @@ public class RotatingServersTests extends FtpTestSupport {
 		public IntegrationFlow flow() {
 			return IntegrationFlows.from(Ftp.inboundAdapter(sf())
 							.filter(new FtpPersistentAcceptOnceFileListFilter(new SimpleMetadataStore(), "rotate"))
-							.localDirectory(new File(tmpDir, "variable"))
+							.localDirectory(new File(TMP_DIR, "variable"))
 							.localFilenameExpression("#remoteDirectory + T(java.io.File).separator + #root")
 							.remoteDirectory("."),
-						e -> e.poller(Pollers.fixedDelay(1).advice(advice())))
+					e -> e.poller(Pollers.fixedDelay(1).advice(advice())))
 					.channel(MessageChannels.queue("files"))
 					.get();
 		}
@@ -300,9 +381,41 @@ public class RotatingServersTests extends FtpTestSupport {
 			return IntegrationFlows.from(Ftp.inboundStreamingAdapter(new FtpRemoteFileTemplate(sf()))
 							.filter(new FtpPersistentAcceptOnceFileListFilter(new SimpleMetadataStore(), "rotate"))
 							.remoteDirectory("."),
-						e -> e.poller(Pollers.fixedDelay(1).advice(advice())))
+					e -> e.poller(Pollers.fixedDelay(1).advice(advice())))
 					.channel(MessageChannels.queue("files"))
 					.get();
+		}
+
+	}
+
+	@Configuration
+	public static class FairStreamingConfig extends StandardConfig {
+
+		@Override
+		@Bean
+		public RotatingServerAdvice advice() {
+			List<RotationPolicy.KeyDirectory> keyDirectories = new ArrayList<>();
+			keyDirectories.add(new RotationPolicy.KeyDirectory("one", "foo"));
+			keyDirectories.add(new RotationPolicy.KeyDirectory("two", "baz"));
+			keyDirectories.add(new RotationPolicy.KeyDirectory("three", "fiz"));
+			return theAdvice(keyDirectories);
+		}
+
+		@Override
+		@Bean
+		public IntegrationFlow flow() {
+			return IntegrationFlows.from(Ftp.inboundStreamingAdapter(new FtpRemoteFileTemplate(sf()))
+							.filter(new FtpPersistentAcceptOnceFileListFilter(new SimpleMetadataStore(), "rotate"))
+							.remoteDirectory(".")
+							.maxFetchSize(1),
+					e -> e.poller(Pollers.fixedDelay(1).advice(advice())))
+					.channel(MessageChannels.queue("files"))
+					.get();
+		}
+
+		@Override
+		protected RotatingServerAdvice theAdvice(List<RotationPolicy.KeyDirectory> keyDirectories) {
+			return new RotatingServerAdvice(sf(), keyDirectories, true);
 		}
 
 	}

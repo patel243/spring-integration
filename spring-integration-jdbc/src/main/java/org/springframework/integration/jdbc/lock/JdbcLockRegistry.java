@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,9 @@ import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.TransientDataAccessException;
 import org.springframework.integration.support.locks.ExpirableLockRegistry;
+import org.springframework.integration.support.locks.RenewableLockRegistry;
 import org.springframework.integration.util.UUIDConverter;
+import org.springframework.transaction.TransactionTimedOutException;
 import org.springframework.util.Assert;
 
 /**
@@ -47,10 +49,13 @@ import org.springframework.util.Assert;
  * @author Kai Zimmermann
  * @author Bartosz Rempuszewski
  * @author Gary Russell
+ * @author Alexandre Strubel
+ * @author Stefan Vassilev
+ * @author Olivier Hubaut
  *
  * @since 4.3
  */
-public class JdbcLockRegistry implements ExpirableLockRegistry {
+public class JdbcLockRegistry implements ExpirableLockRegistry, RenewableLockRegistry {
 
 	private static final int DEFAULT_IDLE = 100;
 
@@ -99,6 +104,19 @@ public class JdbcLockRegistry implements ExpirableLockRegistry {
 		}
 	}
 
+	@Override
+	public void renewLock(Object lockKey) {
+		Assert.isInstanceOf(String.class, lockKey);
+		String path = pathFor((String) lockKey);
+		JdbcLock jdbcLock = this.locks.get(path);
+		if (jdbcLock == null) {
+			throw new IllegalStateException("Could not found mutex at " + path);
+		}
+		if (!jdbcLock.renew()) {
+			throw new IllegalStateException("Could not renew mutex at " + path);
+		}
+	}
+
 	private static final class JdbcLock implements Lock {
 
 		private final LockRepository mutex;
@@ -131,7 +149,7 @@ public class JdbcLockRegistry implements ExpirableLockRegistry {
 					}
 					break;
 				}
-				catch (TransientDataAccessException e) {
+				catch (TransientDataAccessException | TransactionTimedOutException e) {
 					// try again
 				}
 				catch (InterruptedException e) {
@@ -165,7 +183,7 @@ public class JdbcLockRegistry implements ExpirableLockRegistry {
 					}
 					break;
 				}
-				catch (TransientDataAccessException e) {
+				catch (TransientDataAccessException | TransactionTimedOutException e) {
 					// try again
 				}
 				catch (InterruptedException ie) {
@@ -209,7 +227,7 @@ public class JdbcLockRegistry implements ExpirableLockRegistry {
 					}
 					return acquired;
 				}
-				catch (TransientDataAccessException e) {
+				catch (TransientDataAccessException | TransactionTimedOutException e) {
 					// try again
 				}
 				catch (Exception e) {
@@ -230,17 +248,25 @@ public class JdbcLockRegistry implements ExpirableLockRegistry {
 		@Override
 		public void unlock() {
 			if (!this.delegate.isHeldByCurrentThread()) {
-				throw new IllegalMonitorStateException("You do not own mutex at " + this.path);
+				throw new IllegalMonitorStateException("The current thread doesn't own mutex at " + this.path);
 			}
 			if (this.delegate.getHoldCount() > 1) {
 				this.delegate.unlock();
 				return;
 			}
 			try {
-				this.mutex.delete(this.path);
-			}
-			catch (Exception e) {
-				throw new DataAccessResourceFailureException("Failed to release mutex at " + this.path, e);
+				while (true) {
+					try {
+						this.mutex.delete(this.path);
+						return;
+					}
+					catch (TransientDataAccessException | TransactionTimedOutException e) {
+						// try again
+					}
+					catch (Exception e) {
+						throw new DataAccessResourceFailureException("Failed to release mutex at " + this.path, e);
+					}
+				}
 			}
 			finally {
 				this.delegate.unlock();
@@ -254,6 +280,27 @@ public class JdbcLockRegistry implements ExpirableLockRegistry {
 
 		public boolean isAcquiredInThisProcess() {
 			return this.mutex.isAcquired(this.path);
+		}
+
+		public boolean renew() {
+			if (!this.delegate.isHeldByCurrentThread()) {
+				throw new IllegalMonitorStateException("The current thread doesn't own mutex at " + this.path);
+			}
+			while (true) {
+				try {
+					boolean renewed = this.mutex.renew(this.path);
+					if (renewed) {
+						this.lastUsed = System.currentTimeMillis();
+					}
+					return renewed;
+				}
+				catch (TransientDataAccessException | TransactionTimedOutException e) {
+					// try again
+				}
+				catch (Exception e) {
+					throw new DataAccessResourceFailureException("Failed to renew mutex at " + this.path, e);
+				}
+			}
 		}
 
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,12 +26,14 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+import java.time.Duration;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -50,16 +52,15 @@ import org.springframework.integration.channel.QueueChannel;
 import org.springframework.integration.config.ConsumerEndpointFactoryBean;
 import org.springframework.integration.endpoint.ReactiveStreamsConsumer;
 import org.springframework.integration.handler.MethodInvokingMessageHandler;
-import org.springframework.integration.test.condition.LogLevels;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageDeliveryException;
 import org.springframework.messaging.MessageHandler;
 import org.springframework.messaging.ReactiveMessageHandler;
 import org.springframework.messaging.support.GenericMessage;
 
-import reactor.core.publisher.EmitterProcessor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 import reactor.util.Loggers;
 
@@ -110,6 +111,7 @@ public class ReactiveStreamsConsumerTests {
 		assertThat(result).containsExactly(testMessage, testMessage2);
 
 		reactiveConsumer.stop();
+		testChannel.destroy();
 	}
 
 
@@ -174,7 +176,6 @@ public class ReactiveStreamsConsumerTests {
 		reactiveConsumer.stop();
 	}
 
-	@LogLevels(level = "trace", categories = "org.springframework.integration")
 	@Test
 	@SuppressWarnings("unchecked")
 	public void testReactiveStreamsConsumerPollableChannel() throws InterruptedException {
@@ -292,17 +293,18 @@ public class ReactiveStreamsConsumerTests {
 		assertThat(result).containsExactly(testMessage, testMessage2, testMessage2);
 
 		endpointFactoryBean.stop();
+		testChannel.destroy();
 	}
 
 	@Test
 	public void testReactiveStreamsConsumerFluxMessageChannelReactiveMessageHandler() {
 		FluxMessageChannel testChannel = new FluxMessageChannel();
 
-		EmitterProcessor<Message<?>> processor = EmitterProcessor.create(2, false);
+		Sinks.Many<Object> sink = Sinks.many().multicast().onBackpressureBuffer(2, false);
 
 		ReactiveMessageHandler messageHandler =
 				m -> {
-					processor.onNext(m);
+					sink.tryEmitNext(m);
 					return Mono.empty();
 				};
 
@@ -326,12 +328,45 @@ public class ReactiveStreamsConsumerTests {
 		Message<?> testMessage2 = new GenericMessage<>("test2");
 		testChannel.send(testMessage2);
 
-		StepVerifier.create(processor)
+		StepVerifier.create(sink.asFlux())
 				.expectNext(testMessage, testMessage2)
 				.thenCancel()
-				.verify();
+				.verify(Duration.ofSeconds(10));
 
 		reactiveConsumer.stop();
+		testChannel.destroy();
+	}
+
+	@Test
+	public void testReactiveCustomizer() throws Exception {
+		DirectChannel testChannel = new DirectChannel();
+
+		AtomicReference<Message<?>> spied = new AtomicReference<>();
+		AtomicReference<Message<?>> result = new AtomicReference<>();
+		CountDownLatch stopLatch = new CountDownLatch(1);
+
+		MessageHandler messageHandler = m -> {
+			result.set(m);
+			stopLatch.countDown();
+		};
+
+		ConsumerEndpointFactoryBean endpointFactoryBean = new ConsumerEndpointFactoryBean();
+		endpointFactoryBean.setBeanFactory(mock(ConfigurableBeanFactory.class));
+		endpointFactoryBean.setInputChannel(testChannel);
+		endpointFactoryBean.setHandler(messageHandler);
+		endpointFactoryBean.setBeanName("reactiveConsumer");
+		endpointFactoryBean.setReactiveCustomizer(flux -> flux.doOnNext(spied::set));
+		endpointFactoryBean.afterPropertiesSet();
+		endpointFactoryBean.start();
+
+		Message<?> testMessage = new GenericMessage<>("test");
+		testChannel.send(testMessage);
+
+		assertThat(stopLatch.await(10, TimeUnit.SECONDS)).isTrue();
+		endpointFactoryBean.stop();
+
+		assertThat(result.get()).isSameAs(testMessage);
+		assertThat(spied.get()).isSameAs(testMessage);
 	}
 
 }

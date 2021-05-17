@@ -37,58 +37,12 @@ import org.springframework.messaging.support.ExecutorChannelInterceptor;
  * @author Gary Russell
  * @author Artem Bilan
  */
-@SuppressWarnings("deprecation")
 public abstract class AbstractPollableChannel extends AbstractMessageChannel
-		implements PollableChannel, org.springframework.integration.support.management.PollableChannelManagement,
-		ExecutorChannelInterceptorAware {
+		implements PollableChannel, ExecutorChannelInterceptorAware {
 
 	private int executorInterceptorsSize;
 
 	private CounterFacade receiveCounter;
-
-	/**
-	 * Deprecated.
-	 * @return receive count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public int getReceiveCount() {
-		return getMetrics().getReceiveCount();
-	}
-
-	/**
-	 * Deprecated.
-	 * @return receive count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public long getReceiveCountLong() {
-		return getMetrics().getReceiveCountLong();
-	}
-
-	/**
-	 * Deprecated.
-	 * @return error count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public int getReceiveErrorCount() {
-		return getMetrics().getReceiveErrorCount();
-	}
-
-	/**
-	 * Deprecated.
-	 * @return error count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public long getReceiveErrorCountLong() {
-		return getMetrics().getReceiveErrorCountLong();
-	}
 
 	@Override
 	public IntegrationPatternType getIntegrationPatternType() {
@@ -124,7 +78,6 @@ public abstract class AbstractPollableChannel extends AbstractMessageChannel
 		ChannelInterceptorList interceptorList = getIChannelInterceptorList();
 		Deque<ChannelInterceptor> interceptorStack = null;
 		boolean counted = false;
-		boolean countsEnabled = isCountsEnabled();
 		boolean traceEnabled = isLoggingEnabled() && logger.isTraceEnabled();
 		try {
 			if (traceEnabled) {
@@ -144,11 +97,8 @@ public abstract class AbstractPollableChannel extends AbstractMessageChannel
 				}
 			}
 			else {
-				if (countsEnabled) {
-					incrementReceiveCounter();
-					getMetrics().afterReceive();
-					counted = true;
-				}
+				incrementReceiveCounter();
+				counted = true;
 
 				if (logger.isDebugEnabled()) {
 					logger.debug("postReceive on channel '" + this + "', message: " + message);
@@ -162,7 +112,7 @@ public abstract class AbstractPollableChannel extends AbstractMessageChannel
 			return message;
 		}
 		catch (RuntimeException ex) {
-			if (countsEnabled && !counted) {
+			if (!counted) {
 				incrementReceiveErrorCounter(ex);
 			}
 			interceptorList.afterReceiveCompletion(null, this, ex, interceptorStack);
@@ -185,7 +135,6 @@ public abstract class AbstractPollableChannel extends AbstractMessageChannel
 		if (metricsCaptor != null) {
 			buildReceiveCounter(metricsCaptor, ex).increment();
 		}
-		getMetrics().afterError();
 	}
 
 	private CounterFacade buildReceiveCounter(MetricsCaptor metricsCaptor, @Nullable Exception ex) {

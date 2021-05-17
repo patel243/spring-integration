@@ -23,9 +23,10 @@ import static org.mockito.Mockito.when;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.context.ApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -41,6 +42,7 @@ import org.springframework.messaging.MessageChannel;
 
 /**
  * @author Gary Russell
+ * @author Artem Bilan
  *
  * @since 4.2
  *
@@ -66,10 +68,8 @@ public class IntegrationManagementConfigurerTests {
 		assertThat(channel.isLoggingEnabled()).isTrue();
 		assertThat(handler.isLoggingEnabled()).isTrue();
 		assertThat(source.isLoggingEnabled()).isTrue();
-		channel.setCountsEnabled(true);
-		channel.setStatsEnabled(true);
 		ApplicationContext ctx = mock(ApplicationContext.class);
-		Map<String, IntegrationManagement> beans = new HashMap<String, IntegrationManagement>();
+		Map<String, IntegrationManagement> beans = new HashMap<>();
 		beans.put("foo", channel);
 		beans.put("bar", handler);
 		beans.put("baz", source);
@@ -82,20 +82,16 @@ public class IntegrationManagementConfigurerTests {
 		assertThat(channel.isLoggingEnabled()).isFalse();
 		assertThat(handler.isLoggingEnabled()).isFalse();
 		assertThat(source.isLoggingEnabled()).isFalse();
-		assertThat(channel.isCountsEnabled()).isTrue();
-		assertThat(channel.isStatsEnabled()).isTrue();
 	}
 
 	@Test
 	public void testEmptyAnnotation() {
-		AnnotationConfigApplicationContext ctx =
-				new AnnotationConfigApplicationContext(ConfigEmptyAnnotation.class);
-		AbstractMessageChannel channel = ctx.getBean("channel", AbstractMessageChannel.class);
-		assertThat(channel.isCountsEnabled()).isTrue();
-		assertThat(channel.isStatsEnabled()).isTrue();
-		channel = ctx.getBean("loggingOffChannel", AbstractMessageChannel.class);
-		assertThat(channel.isLoggingEnabled()).isFalse();
-		ctx.close();
+		try (ConfigurableApplicationContext ctx = new AnnotationConfigApplicationContext(ConfigEmptyAnnotation.class)) {
+			AbstractMessageChannel channel = ctx.getBean("channel", AbstractMessageChannel.class);
+			assertThat(channel.isLoggingEnabled()).isTrue();
+			channel = ctx.getBean("loggingOffChannel", AbstractMessageChannel.class);
+			assertThat(channel.isLoggingEnabled()).isFalse();
+		}
 	}
 
 	@Configuration
@@ -114,6 +110,7 @@ public class IntegrationManagementConfigurerTests {
 			directChannel.setLoggingEnabled(false);
 			return directChannel;
 		}
+
 	}
 
 }

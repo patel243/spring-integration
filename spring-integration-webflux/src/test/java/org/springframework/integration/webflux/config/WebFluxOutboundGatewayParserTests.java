@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2019 the original author or authors.
+ * Copyright 2017-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,10 @@ package org.springframework.integration.webflux.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,7 +33,7 @@ import org.springframework.integration.endpoint.AbstractEndpoint;
 import org.springframework.integration.test.util.TestUtils;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.junit4.SpringRunner;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.util.ObjectUtils;
 import org.springframework.web.reactive.function.BodyExtractor;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -44,7 +43,7 @@ import org.springframework.web.reactive.function.client.WebClient;
  *
  * @since 5.0
  */
-@RunWith(SpringRunner.class)
+@SpringJUnitConfig
 @DirtiesContext
 public class WebFluxOutboundGatewayParserTests {
 
@@ -79,7 +78,7 @@ public class WebFluxOutboundGatewayParserTests {
 		assertThat(uriExpression.getValue()).isEqualTo("http://localhost/test1");
 		assertThat(TestUtils.getPropertyValue(handler, "httpMethodExpression", Expression.class).getExpressionString())
 				.isEqualTo(HttpMethod.POST.name());
-		assertThat(handlerAccessor.getPropertyValue("charset")).isEqualTo(Charset.forName("UTF-8"));
+		assertThat(handlerAccessor.getPropertyValue("charset")).isEqualTo(StandardCharsets.UTF_8);
 		assertThat(handlerAccessor.getPropertyValue("extractPayload")).isEqualTo(true);
 		assertThat(handlerAccessor.getPropertyValue("transferCookies")).isEqualTo(false);
 		assertThat(handlerAccessor.getPropertyValue("replyPayloadToFlux")).isEqualTo(false);
@@ -106,20 +105,20 @@ public class WebFluxOutboundGatewayParserTests {
 		assertThat(uriExpression.getValue()).isEqualTo("http://localhost/test2");
 		assertThat(TestUtils.getPropertyValue(handler, "httpMethodExpression", Expression.class).getExpressionString())
 				.isEqualTo(HttpMethod.PUT.name());
-		assertThat(handlerAccessor.getPropertyValue("charset")).isEqualTo(Charset.forName("UTF-8"));
+		assertThat(handlerAccessor.getPropertyValue("charset")).isEqualTo(StandardCharsets.UTF_8);
 		assertThat(handlerAccessor.getPropertyValue("extractPayload")).isEqualTo(false);
 		Object sendTimeout = new DirectFieldAccessor(
 				handlerAccessor.getPropertyValue("messagingTemplate")).getPropertyValue("sendTimeout");
-		assertThat(sendTimeout).isEqualTo(new Long("1234"));
+		assertThat(sendTimeout).isEqualTo(1234L);
 		Map<String, Expression> uriVariableExpressions =
 				(Map<String, Expression>) handlerAccessor.getPropertyValue("uriVariableExpressions");
-		assertThat(uriVariableExpressions.size()).isEqualTo(1);
+		assertThat(uriVariableExpressions).hasSize(1);
 		assertThat(uriVariableExpressions.get("foo").getExpressionString()).isEqualTo("headers.bar");
 		DirectFieldAccessor mapperAccessor = new DirectFieldAccessor(handlerAccessor.getPropertyValue("headerMapper"));
 		String[] mappedRequestHeaders = (String[]) mapperAccessor.getPropertyValue("outboundHeaderNames");
 		String[] mappedResponseHeaders = (String[]) mapperAccessor.getPropertyValue("inboundHeaderNames");
-		assertThat(mappedRequestHeaders.length).isEqualTo(2);
-		assertThat(mappedResponseHeaders.length).isEqualTo(1);
+		assertThat(mappedRequestHeaders).hasSize(2);
+		assertThat(mappedResponseHeaders).hasSize(1);
 		assertThat(ObjectUtils.containsElement(mappedRequestHeaders, "requestHeader1")).isTrue();
 		assertThat(ObjectUtils.containsElement(mappedRequestHeaders, "requestHeader2")).isTrue();
 		assertThat(mappedResponseHeaders[0]).isEqualTo("responseHeader");
@@ -128,6 +127,8 @@ public class WebFluxOutboundGatewayParserTests {
 		assertThat(handlerAccessor.getPropertyValue("bodyExtractor")).isSameAs(this.bodyExtractor);
 		assertThat(handlerAccessor.getPropertyValue("publisherElementTypeExpression.expression"))
 				.isEqualTo("headers.elementType");
+		assertThat(handlerAccessor.getPropertyValue("extractResponseBody"))
+				.isEqualTo(false);
 	}
 
 }

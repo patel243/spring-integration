@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -29,7 +29,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.SocketAddress;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -41,6 +43,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+
+import javax.net.SocketFactory;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -50,6 +55,8 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.core.log.LogAccessor;
+import org.springframework.core.log.LogMessage;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.integration.channel.NullChannel;
 import org.springframework.integration.channel.QueueChannel;
@@ -74,6 +81,36 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
  *
  */
 public class ConnectionFactoryTests {
+
+	@Test
+	void netOpenEventOnReadThread() throws InterruptedException, IOException {
+		TcpNetServerConnectionFactory server = new TcpNetServerConnectionFactory(0);
+		AtomicReference<Thread> readThread = new AtomicReference<>();
+		AtomicReference<Thread> openEventThread = new AtomicReference<>();
+		CountDownLatch latch1 = new CountDownLatch(1);
+		CountDownLatch latch2 = new CountDownLatch(1);
+		server.registerListener(msg -> {
+			readThread.set(Thread.currentThread());
+			latch2.countDown();
+			return false;
+		});
+		server.setApplicationEventPublisher(event -> {
+			if (event instanceof TcpConnectionServerListeningEvent) {
+				latch1.countDown();
+			}
+			if (event instanceof TcpConnectionOpenEvent) {
+				openEventThread.set(Thread.currentThread());
+			}
+		});
+		server.afterPropertiesSet();
+		server.start();
+		assertThat(latch1.await(10, TimeUnit.SECONDS)).isTrue();
+		Socket socket = SocketFactory.getDefault().createSocket("localhost", server.getPort());
+		socket.getOutputStream().write("test\r\n".getBytes());
+		socket.close();
+		assertThat(latch2.await(10, TimeUnit.SECONDS)).isTrue();
+		assertThat(readThread.get()).isSameAs(openEventThread.get());
+	}
 
 	@Test
 	public void factoryBeanTests() {
@@ -199,12 +236,14 @@ public class ConnectionFactoryTests {
 
 	private void testEarlyClose(final AbstractServerConnectionFactory factory, String property,
 			String message) throws Exception {
+
 		factory.setApplicationEventPublisher(mock(ApplicationEventPublisher.class));
 		factory.setBeanName("foo");
 		factory.registerListener(mock(TcpListener.class));
 		factory.afterPropertiesSet();
-		Log logger = spy(TestUtils.getPropertyValue(factory, "logger", Log.class));
-		new DirectFieldAccessor(factory).setPropertyValue("logger", logger);
+		LogAccessor logAccessor = TestUtils.getPropertyValue(factory, "logger", LogAccessor.class);
+		Log logger = spy(logAccessor.getLog());
+		new DirectFieldAccessor(logAccessor).setPropertyValue("log", logger);
 		final CountDownLatch latch1 = new CountDownLatch(1);
 		final CountDownLatch latch2 = new CountDownLatch(1);
 		final CountDownLatch latch3 = new CountDownLatch(1);
@@ -215,15 +254,15 @@ public class ConnectionFactoryTests {
 			// wait until the stop nulls the channel
 			latch2.await(10, TimeUnit.SECONDS);
 			return null;
-		}).when(logger).info(contains("Listening"));
+		}).when(logger).info(argThat(logMessage -> logMessage.toString().contains("Listening")));
 		doAnswer(invocation -> {
 			latch3.countDown();
 			return null;
-		}).when(logger).debug(contains(message));
+		}).when(logger).debug(argThat(logMessage -> logMessage.toString().contains(message)));
 		factory.start();
 		assertThat(latch1.await(10, TimeUnit.SECONDS)).as("missing info log").isTrue();
 		// stop on a different thread because it waits for the executor
-		new SimpleAsyncTaskExecutor()
+		new SimpleAsyncTaskExecutor("testEarlyClose-")
 				.execute(factory::stop);
 		int n = 0;
 		DirectFieldAccessor accessor = new DirectFieldAccessor(factory);
@@ -232,9 +271,9 @@ public class ConnectionFactoryTests {
 		latch2.countDown();
 		assertThat(latch3.await(10, TimeUnit.SECONDS)).as("missing debug log").isTrue();
 		String expected = "bean 'foo', port=" + factory.getPort() + message;
-		ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+		ArgumentCaptor<LogMessage> captor = ArgumentCaptor.forClass(LogMessage.class);
 		verify(logger, atLeast(1)).debug(captor.capture());
-		assertThat(captor.getAllValues()).contains(expected);
+		assertThat(captor.getAllValues().stream().map(Object::toString).collect(Collectors.toList())).contains(expected);
 		factory.stop();
 	}
 
@@ -315,7 +354,7 @@ public class ConnectionFactoryTests {
 		gateway.start();
 		if (fail) {
 			assertThatExceptionOfType(MessagingException.class).isThrownBy(() ->
-				gateway.handleMessage(new GenericMessage<>("test1")))
+					gateway.handleMessage(new GenericMessage<>("test1")))
 					.withMessageContaining("Connection test failed for");
 		}
 		else {

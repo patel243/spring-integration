@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,11 +41,11 @@ import org.springframework.util.Assert;
  */
 public class TcpNetServerConnectionFactory extends AbstractServerConnectionFactory {
 
-	private volatile ServerSocket serverSocket;
-
-	private volatile TcpSocketFactorySupport tcpSocketFactorySupport = new DefaultTcpNetSocketFactorySupport();
+	private TcpSocketFactorySupport tcpSocketFactorySupport = new DefaultTcpNetSocketFactorySupport();
 
 	private TcpNetConnectionSupport tcpNetConnectionSupport = new DefaultTcpNetConnectionSupport();
+
+	private volatile ServerSocket serverSocket;
 
 	/**
 	 * Listens for incoming connections on the port.
@@ -81,6 +81,11 @@ public class TcpNetServerConnectionFactory extends AbstractServerConnectionFacto
 		}
 	}
 
+	public void setTcpSocketFactorySupport(TcpSocketFactorySupport tcpSocketFactorySupport) {
+		Assert.notNull(tcpSocketFactorySupport, "TcpSocketFactorySupport may not be null");
+		this.tcpSocketFactorySupport = tcpSocketFactorySupport;
+	}
+
 	/**
 	 * Set the {@link TcpNetConnectionSupport} to use to create connection objects.
 	 * @param connectionSupport the connection support.
@@ -100,97 +105,97 @@ public class TcpNetServerConnectionFactory extends AbstractServerConnectionFacto
 	 */
 	@Override
 	public void run() {
-		ServerSocket theServerSocket = null;
 		if (getListener() == null) {
-			logger.info(this + " No listener bound to server connection factory; will not read; exiting...");
+			logger.info(() -> this + " No listener bound to server connection factory; will not read; exiting...");
 			return;
 		}
 		try {
-			if (getLocalAddress() == null) {
-				theServerSocket = createServerSocket(super.getPort(), getBacklog(), null);
-			}
-			else {
-				InetAddress whichNic = InetAddress.getByName(getLocalAddress());
-				theServerSocket = createServerSocket(super.getPort(), getBacklog(), whichNic);
-			}
-			getTcpSocketSupport().postProcessServerSocket(theServerSocket);
-			this.serverSocket = theServerSocket;
-			setListening(true);
-			logger.info(this + " Listening");
-			publishServerListeningEvent(getPort());
+			setupServerSocket();
 			while (true) {
-				final Socket socket;
-				/*
-				 *  User hooks in the TcpSocketSupport may have set the server socket SO_TIMEOUT.
-				 *  Not fatal.
-				 */
-				try {
-					if (this.serverSocket == null) {
-						if (logger.isDebugEnabled()) {
-							logger.debug(this + " stopped before accept");
-						}
-						throw new IOException(this + " stopped before accept");
-					}
-					else {
-						socket = this.serverSocket.accept();
-					}
-				}
-				catch (@SuppressWarnings("unused") SocketTimeoutException ste) {
-					if (logger.isDebugEnabled()) {
-						logger.debug("Timed out on accept; continuing");
-					}
-					continue;
-				}
-				if (isShuttingDown()) {
-					if (logger.isInfoEnabled()) {
-						logger.info("New connection from " + socket.getInetAddress().getHostAddress()
-								+ ":" + socket.getPort()
-								+ " rejected; the server is in the process of shutting down.");
-					}
-					socket.close();
-				}
-				else {
-					if (logger.isDebugEnabled()) {
-						logger.debug("Accepted connection from " + socket.getInetAddress().getHostAddress()
-								+ ":" + socket.getPort());
-					}
-					try {
-						setSocketAttributes(socket);
-						TcpConnectionSupport connection = this.tcpNetConnectionSupport.createNewConnection(socket, true,
-								isLookupHost(), getApplicationEventPublisher(), getComponentName());
-						connection = wrapConnection(connection);
-						initializeConnection(connection, socket);
-						getTaskExecutor().execute(connection);
-						harvestClosedConnections();
-						connection.publishConnectionOpenEvent();
-					}
-					catch (RuntimeException e) {
-						this.logger.error("Failed to create and configure a TcpConnection for the new socket: "
-								+ socket.getInetAddress().getHostAddress() + ":" + socket.getPort(), e);
-						try {
-							socket.close();
-						}
-						catch (@SuppressWarnings("unused") IOException e1) { // NOSONAR - exception as flow control
-							// empty
-						}
-					}
-				}
+				acceptConnectionAndExecute();
 			}
 		}
-		catch (IOException e) { // NOSONAR flow control via exceptions
+		catch (IOException ex) { // NOSONAR flow control via exceptions
 			// don't log an error if we had a good socket once and now it's closed
-			if (e instanceof SocketException && theServerSocket != null) {
+			if (ex instanceof SocketException && this.serverSocket != null) { // NOSONAR flow control via exceptions
 				logger.info("Server Socket closed");
 			}
 			else if (isActive()) {
-				logger.error("Error on ServerSocket; port = " + getPort(), e);
-				publishServerExceptionEvent(e);
+				logger.error(ex, "Error on ServerSocket; port = " + getPort());
+				publishServerExceptionEvent(ex);
 				stop();
 			}
 		}
 		finally {
 			setListening(false);
 			setActive(false);
+		}
+	}
+
+	private void setupServerSocket() throws IOException {
+		ServerSocket theServerSocket;
+		if (getLocalAddress() == null) {
+			theServerSocket = createServerSocket(super.getPort(), getBacklog(), null);
+		}
+		else {
+			InetAddress whichNic = InetAddress.getByName(getLocalAddress());
+			theServerSocket = createServerSocket(super.getPort(), getBacklog(), whichNic);
+		}
+		getTcpSocketSupport().postProcessServerSocket(theServerSocket);
+		this.serverSocket = theServerSocket;
+		setListening(true);
+		logger.info(() -> this + " Listening");
+		publishServerListeningEvent(getPort());
+	}
+
+	private void acceptConnectionAndExecute() throws IOException {
+		final Socket socket;
+		/*
+		 *  User hooks in the TcpSocketSupport may have set the server socket SO_TIMEOUT.
+		 *  Not fatal.
+		 */
+		try {
+			if (this.serverSocket == null) {
+				logger.debug(() -> this + " stopped before accept");
+				throw new IOException(this + " stopped before accept");
+			}
+			else {
+				socket = this.serverSocket.accept();
+			}
+		}
+		catch (@SuppressWarnings("unused") SocketTimeoutException ste) {
+			logger.debug("Timed out on accept; continuing");
+			return;
+		}
+		if (isShuttingDown()) {
+			logger.info(() -> "New connection from " + socket.getInetAddress().getHostAddress()
+					+ ":" + socket.getPort()
+					+ " rejected; the server is in the process of shutting down.");
+			socket.close();
+		}
+		else {
+			logger.debug(() -> "Accepted connection from " + socket.getInetAddress().getHostAddress()
+					+ ":" + socket.getPort());
+			try {
+				setSocketAttributes(socket);
+				TcpConnectionSupport connection = this.tcpNetConnectionSupport.createNewConnection(socket, true,
+						isLookupHost(), getApplicationEventPublisher(), getComponentName());
+				connection = wrapConnection(connection);
+				initializeConnection(connection, socket);
+				getTaskExecutor().execute(connection);
+				harvestClosedConnections();
+			}
+			catch (RuntimeException ex) {
+				this.logger.error(ex, () ->
+						"Failed to create and configure a TcpConnection for the new socket: "
+								+ socket.getInetAddress().getHostAddress() + ":" + socket.getPort());
+				try {
+					socket.close();
+				}
+				catch (@SuppressWarnings("unused") IOException e1) { // NOSONAR - exception as flow control
+					// empty
+				}
+			}
 		}
 	}
 
@@ -239,11 +244,6 @@ public class TcpNetServerConnectionFactory extends AbstractServerConnectionFacto
 
 	protected TcpSocketFactorySupport getTcpSocketFactorySupport() {
 		return this.tcpSocketFactorySupport;
-	}
-
-	public void setTcpSocketFactorySupport(TcpSocketFactorySupport tcpSocketFactorySupport) {
-		Assert.notNull(tcpSocketFactorySupport, "TcpSocketFactorySupport may not be null");
-		this.tcpSocketFactorySupport = tcpSocketFactorySupport;
 	}
 
 }

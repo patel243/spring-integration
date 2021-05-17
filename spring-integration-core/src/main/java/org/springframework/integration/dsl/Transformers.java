@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -215,14 +215,15 @@ public abstract class Transformers {
 		return transformer;
 	}
 
-	public static PayloadDeserializingTransformer deserializer(String... whiteListPatterns) {
-		return deserializer(null, whiteListPatterns);
+	public static PayloadDeserializingTransformer deserializer(String... allowedPatterns) {
+		return deserializer(null, allowedPatterns);
 	}
 
 	public static PayloadDeserializingTransformer deserializer(@Nullable Deserializer<Object> deserializer,
-			String... whiteListPatterns) {
+			String... allowedPatterns) {
+
 		PayloadDeserializingTransformer transformer = new PayloadDeserializingTransformer();
-		transformer.setWhiteListPatterns(whiteListPatterns);
+		transformer.setAllowedPatterns(allowedPatterns);
 		if (deserializer != null) {
 			transformer.setDeserializer(deserializer);
 		}
@@ -318,22 +319,20 @@ public abstract class Transformers {
 
 		return Flux.from(publisher)
 				.flatMap(message ->
-						Mono.subscriberContext()
-								.map(ctx -> {
-									ctx.get(RequestMessageHolder.class).set(message);
-									return message;
-								}))
+						Mono.deferContextual(ctx -> {
+							ctx.get(RequestMessageHolder.class).set(message);
+							return Mono.just(message);
+						}))
 				.transform(fluxFunction)
 				.flatMap(data ->
 						data instanceof Message<?>
 								? Mono.just((Message<O>) data)
-								: Mono.subscriberContext()
-										.map(ctx -> ctx.get(RequestMessageHolder.class).get())
-										.map(requestMessage ->
-												MessageBuilder.withPayload(data)
-														.copyHeaders(requestMessage.getHeaders())
-														.build()))
-				.subscriberContext(ctx -> ctx.put(RequestMessageHolder.class, new RequestMessageHolder()));
+								: Mono.deferContextual(ctx -> Mono.just(ctx.get(RequestMessageHolder.class).get()))
+								.map(requestMessage ->
+										MessageBuilder.withPayload(data)
+												.copyHeaders(requestMessage.getHeaders())
+												.build()))
+				.contextWrite(ctx -> ctx.put(RequestMessageHolder.class, new RequestMessageHolder()));
 	}
 
 

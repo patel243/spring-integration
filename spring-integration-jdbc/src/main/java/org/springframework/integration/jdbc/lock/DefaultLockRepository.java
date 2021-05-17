@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,6 +43,7 @@ import org.springframework.util.Assert;
  * @author Artem Bilan
  * @author Glenn Renfro
  * @author Gary Russell
+ * @author Alexandre Strubel
  *
  * @since 4.3
  */
@@ -72,15 +73,20 @@ public class DefaultLockRepository implements LockRepository, InitializingBean {
 
 	private String deleteQuery = "DELETE FROM %sLOCK WHERE REGION=? AND LOCK_KEY=? AND CLIENT_ID=?";
 
-	private String deleteExpiredQuery = "DELETE FROM %sLOCK WHERE REGION=? AND LOCK_KEY=? AND CREATED_DATE<?";
+	private String deleteExpiredQuery = "DELETE FROM %sLOCK WHERE REGION=? AND CREATED_DATE<?";
 
 	private String deleteAllQuery = "DELETE FROM %sLOCK WHERE REGION=? AND CLIENT_ID=?";
 
-	private String updateQuery = "UPDATE %sLOCK SET CREATED_DATE=? WHERE REGION=? AND LOCK_KEY=? AND CLIENT_ID=?";
+	private String updateQuery =
+			"UPDATE %sLOCK SET CLIENT_ID=?, CREATED_DATE=? WHERE REGION=? AND LOCK_KEY=? " +
+					"AND (CLIENT_ID=? OR CREATED_DATE<?)";
 
 	private String insertQuery = "INSERT INTO %sLOCK (REGION, LOCK_KEY, CLIENT_ID, CREATED_DATE) VALUES (?, ?, ?, ?)";
 
-	private String countQuery = "SELECT COUNT(REGION) FROM %sLOCK WHERE REGION=? AND LOCK_KEY=? AND CLIENT_ID=? AND CREATED_DATE>=?";
+	private String countQuery =
+			"SELECT COUNT(REGION) FROM %sLOCK WHERE REGION=? AND LOCK_KEY=? AND CLIENT_ID=? AND CREATED_DATE>=?";
+
+	private String renewQuery = "UPDATE %sLOCK SET CREATED_DATE=? WHERE REGION=? AND LOCK_KEY=? AND CLIENT_ID=?";
 
 	/**
 	 * Constructor that initializes the client id that will be associated for
@@ -108,7 +114,7 @@ public class DefaultLockRepository implements LockRepository, InitializingBean {
 	/**
 	 * A unique grouping identifier for all locks persisted with this store. Using
 	 * multiple regions allows the store to be partitioned (if necessary) for different
-	 * purposes. Defaults to <code>DEFAULT</code>.
+	 * purposes. Defaults to {@code DEFAULT}.
 	 * @param region the region name to set
 	 */
 	public void setRegion(String region) {
@@ -140,6 +146,7 @@ public class DefaultLockRepository implements LockRepository, InitializingBean {
 		this.updateQuery = String.format(this.updateQuery, this.prefix);
 		this.insertQuery = String.format(this.insertQuery, this.prefix);
 		this.countQuery = String.format(this.countQuery, this.prefix);
+		this.renewQuery = String.format(this.renewQuery, this.prefix);
 	}
 
 	@Override
@@ -152,11 +159,11 @@ public class DefaultLockRepository implements LockRepository, InitializingBean {
 		this.template.update(this.deleteQuery, this.region, lock, this.id);
 	}
 
-	@Transactional(isolation = Isolation.SERIALIZABLE, timeout = 1)
+	@Transactional(isolation = Isolation.SERIALIZABLE)
 	@Override
 	public boolean acquire(String lock) {
-		deleteExpired(lock);
-		if (this.template.update(this.updateQuery, new Date(), this.region, lock, this.id) > 0) {
+		if (this.template.update(this.updateQuery, this.id, new Date(), this.region, lock, this.id,
+				new Date(System.currentTimeMillis() - this.ttl)) > 0) {
 			return true;
 		}
 		try {
@@ -169,14 +176,18 @@ public class DefaultLockRepository implements LockRepository, InitializingBean {
 
 	@Override
 	public boolean isAcquired(String lock) {
-		deleteExpired(lock);
 		return this.template.queryForObject(this.countQuery, Integer.class, // NOSONAR query never returns null
 				this.region, lock, this.id, new Date(System.currentTimeMillis() - this.ttl)) == 1;
 	}
 
-	private void deleteExpired(String lock) {
-		this.template.update(this.deleteExpiredQuery, this.region, lock,
-				new Date(System.currentTimeMillis() - this.ttl));
+	@Override
+	public void deleteExpired() {
+		this.template.update(this.deleteExpiredQuery, this.region, new Date(System.currentTimeMillis() - this.ttl));
+	}
+
+	@Override
+	public boolean renew(String lock) {
+		return this.template.update(this.renewQuery, new Date(), this.region, lock, this.id) > 0;
 	}
 
 }

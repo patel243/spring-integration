@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,8 +23,10 @@ import static org.mockito.Mockito.mock;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
-import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.util.Enumeration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -45,8 +47,10 @@ import org.springframework.integration.handler.ServiceActivatingHandler;
 import org.springframework.integration.ip.IpHeaders;
 import org.springframework.integration.ip.util.SocketTestUtils;
 import org.springframework.integration.support.MessageBuilder;
+import org.springframework.integration.test.rule.Log4j2LevelAdjuster;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.SubscribableChannel;
+import org.springframework.util.SocketUtils;
 
 /**
  *
@@ -58,6 +62,9 @@ import org.springframework.messaging.SubscribableChannel;
  *
  */
 public class UdpChannelAdapterTests {
+
+	@Rule
+	public Log4j2LevelAdjuster adjuster = Log4j2LevelAdjuster.trace();
 
 	@Rule
 	public MulticastRule multicastRule = new MulticastRule();
@@ -183,7 +190,7 @@ public class UdpChannelAdapterTests {
 		final CountDownLatch receiverReadyLatch = new CountDownLatch(1);
 		final CountDownLatch replyReceivedLatch = new CountDownLatch(1);
 		//main thread sends the reply using the headers, this thread will receive it
-		new SimpleAsyncTaskExecutor()
+		new SimpleAsyncTaskExecutor("testUnicastReceiverWithReply-")
 				.execute(() -> {
 					DatagramPacket answer = new DatagramPacket(new byte[2000], 2000);
 					try {
@@ -218,7 +225,7 @@ public class UdpChannelAdapterTests {
 
 	@SuppressWarnings("unchecked")
 	@Test
-	public void testUnicastSender() throws Exception {
+	public void testUnicastSender() {
 		QueueChannel channel = new QueueChannel(2);
 		UnicastReceivingChannelAdapter adapter = new UnicastReceivingChannelAdapter(0);
 		adapter.setBeanName("test");
@@ -249,8 +256,10 @@ public class UdpChannelAdapterTests {
 		MulticastReceivingChannelAdapter adapter =
 				new MulticastReceivingChannelAdapter(this.multicastRule.getGroup(), 0);
 		adapter.setOutputChannel(channel);
-		String nic = this.multicastRule.getNic();
-		adapter.setLocalAddress(nic);
+		NetworkInterface nic = this.multicastRule.getNic();
+		if (nic != null) {
+			adapter.setLocalAddress(nic.getInetAddresses().nextElement().getHostName());
+		}
 		adapter.start();
 		SocketTestUtils.waitListening(adapter);
 		int port = adapter.getPort();
@@ -259,7 +268,24 @@ public class UdpChannelAdapterTests {
 		DatagramPacketMessageMapper mapper = new DatagramPacketMessageMapper();
 		DatagramPacket packet = mapper.fromMessage(message);
 		packet.setSocketAddress(new InetSocketAddress(this.multicastRule.getGroup(), port));
-		DatagramSocket datagramSocket = new DatagramSocket(0, Inet4Address.getByName(nic));
+		InetAddress inetAddress = null;
+		if (nic != null) {
+			Enumeration<InetAddress> addressesFromNetworkInterface = nic.getInetAddresses();
+			while (addressesFromNetworkInterface.hasMoreElements()) {
+				InetAddress address = addressesFromNetworkInterface.nextElement();
+				if (address.isSiteLocalAddress()
+						&& !address.isAnyLocalAddress()
+						&& !address.isLinkLocalAddress()
+						&& !address.isLoopbackAddress()) {
+
+					inetAddress = address;
+					break;
+				}
+			}
+
+		}
+		DatagramSocket datagramSocket =
+				new DatagramSocket(SocketUtils.findAvailableUdpPort(), inetAddress);
 		datagramSocket.send(packet);
 		datagramSocket.close();
 
@@ -271,19 +297,23 @@ public class UdpChannelAdapterTests {
 
 	@SuppressWarnings("unchecked")
 	@Test
-	public void testMulticastSender() throws Exception {
+	public void testMulticastSender() {
 		QueueChannel channel = new QueueChannel(2);
 		UnicastReceivingChannelAdapter adapter =
 				new MulticastReceivingChannelAdapter(this.multicastRule.getGroup(), 0);
 		adapter.setOutputChannel(channel);
-		String nic = this.multicastRule.getNic();
-		adapter.setLocalAddress(nic);
+		NetworkInterface nic = this.multicastRule.getNic();
+		if (nic != null) {
+			adapter.setLocalAddress(nic.getInetAddresses().nextElement().getHostName());
+		}
 		adapter.start();
 		SocketTestUtils.waitListening(adapter);
 
 		MulticastSendingMessageHandler handler =
 				new MulticastSendingMessageHandler(this.multicastRule.getGroup(), adapter.getPort());
-		handler.setLocalAddress(nic);
+		if (nic != null) {
+			handler.setLocalAddress(nic.getInetAddresses().nextElement().getHostName());
+		}
 		Message<byte[]> message = MessageBuilder.withPayload("ABCD".getBytes()).build();
 		handler.handleMessage(message);
 

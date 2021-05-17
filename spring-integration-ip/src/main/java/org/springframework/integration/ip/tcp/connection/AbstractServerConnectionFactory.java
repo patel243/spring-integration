@@ -127,7 +127,7 @@ public abstract class AbstractServerConnectionFactory extends AbstractConnection
 		if (listener != null) {
 			connection.registerListener(listener);
 		}
-		connection.registerSender(getSender());
+		connection.registerSenders(getSenders());
 		connection.setMapper(getMapper());
 		connection.setDeserializer(getDeserializer());
 		connection.setSerializer(getSerializer());
@@ -141,8 +141,8 @@ public abstract class AbstractServerConnectionFactory extends AbstractConnection
 			try {
 				socket.setSoTimeout(DEFAULT_REPLY_TIMEOUT);
 			}
-			catch (SocketException e) {
-				logger.error("Error setting default reply timeout", e);
+			catch (SocketException ex) {
+				logger.error(ex, "Error setting default reply timeout");
 			}
 		}
 

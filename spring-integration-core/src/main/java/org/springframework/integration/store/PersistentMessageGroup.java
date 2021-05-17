@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,20 +20,24 @@ import java.util.AbstractCollection;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.Spliterator;
+import java.util.stream.Stream;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.springframework.integration.IntegrationMessageHeaderAccessor;
+import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 
 /**
  * @author Artem Bilan
+ *
  * @since 4.3
  */
 class PersistentMessageGroup implements MessageGroup {
 
-	private static final Log logger = LogFactory.getLog(PersistentMessageGroup.class);
+	private static final Log LOGGER = LogFactory.getLog(PersistentMessageGroup.class);
 
 	private final MessageGroupStore messageGroupStore;
 
@@ -59,13 +63,23 @@ class PersistentMessageGroup implements MessageGroup {
 		return Collections.unmodifiableCollection(this.messages);
 	}
 
+	/**
+	 * The resulting {@link Stream} must be closed after use,
+	 * it can be declared as a resource in a {@code try-with-resources} statement.
+	 * @return the stream of messages in this group.
+	 */
+	@Override
+	public Stream<Message<?>> streamMessages() {
+		return this.messageGroupStore.streamMessagesForGroup(this.original.getGroupId());
+	}
+
 	@Override
 	public Message<?> getOne() {
 		if (this.oneMessage == null) {
 			synchronized (this) {
 				if (this.oneMessage == null) {
-					if (logger.isDebugEnabled()) {
-						logger.debug("Lazy loading of one message for messageGroup: " + this.original.getGroupId());
+					if (LOGGER.isDebugEnabled()) {
+						LOGGER.debug("Lazy loading of one message for messageGroup: " + this.original.getGroupId());
 					}
 					this.oneMessage = this.messageGroupStore.getOneMessageFromGroup(this.original.getGroupId());
 				}
@@ -97,8 +111,8 @@ class PersistentMessageGroup implements MessageGroup {
 		if (this.size == 0) {
 			synchronized (this) {
 				if (this.size == 0) {
-					if (logger.isDebugEnabled()) {
-						logger.debug("Lazy loading of group size for messageGroup: " + this.original.getGroupId());
+					if (LOGGER.isDebugEnabled()) {
+						LOGGER.debug("Lazy loading of group size for messageGroup: " + this.original.getGroupId());
 					}
 					this.size = this.messageGroupStore.messageGroupSize(this.original.getGroupId());
 				}
@@ -163,6 +177,17 @@ class PersistentMessageGroup implements MessageGroup {
 	}
 
 	@Override
+	public void setCondition(String condition) {
+		this.original.setCondition(condition);
+	}
+
+	@Override
+	@Nullable
+	public String getCondition() {
+		return this.original.getCondition();
+	}
+
+	@Override
 	public void clear() {
 		this.original.clear();
 	}
@@ -180,8 +205,8 @@ class PersistentMessageGroup implements MessageGroup {
 				synchronized (this) {
 					if (this.collection == null) {
 						Object groupId = PersistentMessageGroup.this.original.getGroupId();
-						if (logger.isDebugEnabled()) {
-							logger.debug("Lazy loading of messages for messageGroup: " + groupId);
+						if (LOGGER.isDebugEnabled()) {
+							LOGGER.debug("Lazy loading of messages for messageGroup: " + groupId);
 						}
 						this.collection = PersistentMessageGroup.this.messageGroupStore.getMessagesForGroup(groupId);
 					}
@@ -222,6 +247,16 @@ class PersistentMessageGroup implements MessageGroup {
 		@Override
 		public int size() {
 			return PersistentMessageGroup.this.size();
+		}
+
+		@Override
+		public Spliterator<Message<?>> spliterator() {
+			return streamMessages().spliterator();
+		}
+
+		@Override
+		public Stream<Message<?>> stream() {
+			return streamMessages();
 		}
 
 	}

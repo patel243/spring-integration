@@ -66,8 +66,7 @@ import io.rsocket.transport.netty.server.TcpServerTransport;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.MonoProcessor;
-import reactor.core.publisher.ReplayProcessor;
+import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 
 /**
@@ -107,6 +106,9 @@ public class RSocketOutboundGatewayIntegrationTests {
 	@Autowired
 	private TestController clientController;
 
+	@Autowired
+	RSocketOutboundGateway clientRsocketOutboundGateway;
+
 	private RSocketRequester serverRsocketRequester;
 
 	@BeforeAll
@@ -133,7 +135,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 	@BeforeEach
 	void setupTest(TestInfo testInfo) {
 		if (testInfo.getDisplayName().startsWith("server")) {
-			this.serverRsocketRequester = serverController.clientRequester.block(Duration.ofSeconds(10));
+			this.serverRsocketRequester = serverController.clientRequester.asMono().block(Duration.ofSeconds(10));
 		}
 	}
 
@@ -158,10 +160,10 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		StepVerifier.create(controller.fireForgetPayloads)
+		StepVerifier.create(controller.fireForgetPayloads.asFlux())
 				.expectNext("Hello")
 				.thenCancel()
-				.verify();
+				.verify(Duration.ofSeconds(10));
 
 		disposable.dispose();
 	}
@@ -196,7 +198,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 	@Test
@@ -228,7 +230,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 	@Test
@@ -262,7 +264,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 	@Test
@@ -296,7 +298,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 
@@ -327,7 +329,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 	@Test
@@ -357,7 +359,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 	@Test
@@ -389,7 +391,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 	@Test
@@ -421,7 +423,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 						.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, rsocketRequester)
 						.build());
 
-		verifier.verify();
+		verifier.verify(Duration.ofSeconds(10));
 	}
 
 	@Test
@@ -432,6 +434,27 @@ public class RSocketOutboundGatewayIntegrationTests {
 	@Test
 	void serverNoMatchingRoute() {
 		noMatchingRoute(serverInputChannel, serverResultChannel, serverErrorChannel, this.serverRsocketRequester);
+	}
+
+	@Test
+	void voidRequestChannel() {
+		Disposable disposable = Flux.from(resultChannel).subscribe();
+		this.clientRsocketOutboundGateway.setExpectedResponseType(void.class);
+		Flux<String> testData = Flux.range(1, 10).map(i -> "Hello " + i);
+		this.inputChannel.send(
+				MessageBuilder.withPayload(testData)
+						.setHeader(ROUTE_HEADER, "void-channel")
+						.setHeader(INTERACTION_MODEL_HEADER, RSocketInteractionModel.requestChannel)
+						.build());
+
+		StepVerifier.create(serverController.voidChannelPayloads.asFlux())
+				.expectNext(testData.toStream().toArray(String[]::new))
+				.thenCancel()
+				.verify(Duration.ofSeconds(10));
+
+
+		disposable.dispose();
+		this.clientRsocketOutboundGateway.setExpectedResponseType(String.class);
 	}
 
 	private void noMatchingRoute(MessageChannel inputChannel, FluxMessageChannel resultChannel,
@@ -498,14 +521,16 @@ public class RSocketOutboundGatewayIntegrationTests {
 		@Bean(destroyMethod = "dispose")
 		@Nullable
 		public RSocket rsocketForServerRequests() {
+
 			return RSocketRequester.builder()
 					.setupRoute("clientConnect")
 					.rsocketConnector(connector ->
 							connector.acceptor(
 									RSocketMessageHandler.responder(RSocketStrategies.create(), controller())))
-					.connectTcp("localhost", server.address().getPort())
-					.block()
-					.rsocket();
+					.tcp("localhost", server.address().getPort())
+					.rsocketClient()
+					.source()
+					.block();
 		}
 
 		@Bean
@@ -537,13 +562,15 @@ public class RSocketOutboundGatewayIntegrationTests {
 	@Controller
 	static class TestController {
 
-		final ReplayProcessor<String> fireForgetPayloads = ReplayProcessor.create();
+		final Sinks.Many<String> fireForgetPayloads = Sinks.many().replay().all();
 
-		final MonoProcessor<RSocketRequester> clientRequester = MonoProcessor.create();
+		final Sinks.Many<String> voidChannelPayloads = Sinks.many().replay().all();
+
+		final Sinks.One<RSocketRequester> clientRequester = Sinks.one();
 
 		@MessageMapping("receive")
 		void receive(String payload) {
-			this.fireForgetPayloads.onNext(payload);
+			this.fireForgetPayloads.tryEmitNext(payload);
 		}
 
 		@MessageMapping("echo")
@@ -564,6 +591,11 @@ public class RSocketOutboundGatewayIntegrationTests {
 		@MessageMapping("echo-channel")
 		Flux<String> echoChannel(Flux<String> payloads) {
 			return payloads.delayElements(Duration.ofMillis(10)).map(payload -> payload + " async");
+		}
+
+		@MessageMapping("void-channel")
+		Mono<Void> voidChannel(Flux<String> payloads) {
+			return payloads.map(voidChannelPayloads::tryEmitNext).then();
 		}
 
 		@MessageMapping("thrown-exception")
@@ -595,7 +627,7 @@ public class RSocketOutboundGatewayIntegrationTests {
 
 		@ConnectMapping("clientConnect")
 		void clientConnect(RSocketRequester requester) {
-			this.clientRequester.onNext(requester);
+			this.clientRequester.tryEmitValue(requester);
 		}
 
 	}

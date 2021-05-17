@@ -50,7 +50,7 @@ import io.rsocket.transport.netty.server.CloseableChannel;
 import io.rsocket.transport.netty.server.TcpServerTransport;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.MonoProcessor;
+import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 
 /**
@@ -93,11 +93,10 @@ public class RSocketInboundGatewayIntegrationTests {
 	@BeforeEach
 	void setupTest(TestInfo testInfo) {
 		if (testInfo.getDisplayName().startsWith("server")) {
-			this.serverRsocketRequester = serverConfig.clientRequester.block(Duration.ofSeconds(10));
+			this.serverRsocketRequester = serverConfig.clientRequester.asMono().block(Duration.ofSeconds(10));
 		}
 		else {
-			this.clientRsocketRequester =
-					this.clientRSocketConnector.getRSocketRequester().block(Duration.ofSeconds(10));
+			this.clientRsocketRequester = this.clientRSocketConnector.getRequester();
 		}
 	}
 
@@ -181,7 +180,7 @@ public class RSocketInboundGatewayIntegrationTests {
 	@EnableIntegration
 	static class ServerConfig extends CommonConfig {
 
-		final MonoProcessor<RSocketRequester> clientRequester = MonoProcessor.create();
+		final Sinks.One<RSocketRequester> clientRequester = Sinks.one();
 
 		@Bean
 		public CloseableChannel rsocketServer() {
@@ -204,7 +203,7 @@ public class RSocketInboundGatewayIntegrationTests {
 
 		@EventListener
 		public void onApplicationEvent(RSocketConnectedEvent event) {
-			this.clientRequester.onNext(event.getRequester());
+			this.clientRequester.tryEmitValue(event.getRequester());
 		}
 
 	}

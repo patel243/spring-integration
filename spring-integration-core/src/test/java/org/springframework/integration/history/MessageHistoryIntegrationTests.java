@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package org.springframework.integration.history;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import java.util.Iterator;
 import java.util.Map;
@@ -24,12 +25,12 @@ import java.util.Properties;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.junit.Ignore;
-import org.junit.Test;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import org.springframework.beans.DirectFieldAccessor;
-import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.support.ClassPathXmlApplicationContext;
 import org.springframework.integration.channel.DirectChannel;
@@ -56,9 +57,8 @@ public class MessageHistoryIntegrationTests {
 		Map<String, ConsumerEndpointFactoryBean> cefBeans = ac.getBeansOfType(ConsumerEndpointFactoryBean.class);
 		for (ConsumerEndpointFactoryBean cefBean : cefBeans.values()) {
 			DirectFieldAccessor bridgeAccessor = new DirectFieldAccessor(cefBean);
-			String handlerClassName = bridgeAccessor.getPropertyValue("handler").getClass().getName();
-			assertThat("org.springframework.integration.config.MessageHistoryWritingMessageHandler"
-					.equals(handlerClassName)).isFalse();
+			Boolean shouldTrack = (Boolean) bridgeAccessor.getPropertyValue("handler.shouldTrack");
+			assertThat(shouldTrack).isFalse();
 		}
 		ac.close();
 	}
@@ -77,7 +77,7 @@ public class MessageHistoryIntegrationTests {
 						.get(MessageHistory.HEADER_NAME, MessageHistory.class).iterator();
 
 				Properties event = historyIterator.next();
-				assertThat(event.getProperty(MessageHistory.NAME_PROPERTY)).isEqualTo("sampleGateway");
+				assertThat(event.getProperty(MessageHistory.NAME_PROPERTY)).isEqualTo("sampleGateway#echo(String)");
 				assertThat(event.getProperty(MessageHistory.TYPE_PROPERTY)).isEqualTo("gateway");
 
 				event = historyIterator.next();
@@ -208,7 +208,7 @@ public class MessageHistoryIntegrationTests {
 						.get(MessageHistory.HEADER_NAME, MessageHistory.class).iterator();
 				assertThat(historyIterator.hasNext()).isTrue();
 				Properties gatewayHistory = historyIterator.next();
-				assertThat(gatewayHistory.get("name")).isEqualTo("sampleGateway");
+				assertThat(gatewayHistory.get("name")).isEqualTo("sampleGateway#echo(String)");
 				assertThat(historyIterator.hasNext()).isTrue();
 				Properties chainHistory = historyIterator.next();
 				assertThat(chainHistory.get("name")).isEqualTo("sampleChain");
@@ -223,14 +223,16 @@ public class MessageHistoryIntegrationTests {
 		ac.close();
 	}
 
-	@Test(expected = BeanCreationException.class)
+	@Test
 	public void testMessageHistoryMoreThanOneNamespaceFail() {
-		new ClassPathXmlApplicationContext("messageHistoryWithHistoryWriterNamespace-fail.xml",
-				MessageHistoryIntegrationTests.class).close();
+		assertThatExceptionOfType(BeanDefinitionStoreException.class)
+				.isThrownBy(() ->
+						new ClassPathXmlApplicationContext("messageHistoryWithHistoryWriterNamespace-fail.xml",
+								MessageHistoryIntegrationTests.class));
 	}
 
 	@Test
-	@Ignore
+	@Disabled
 	public void testMessageHistoryWithHistoryPerformance() {
 		ConfigurableApplicationContext acWithHistory = new ClassPathXmlApplicationContext("perfWithMessageHistory.xml",
 				MessageHistoryIntegrationTests.class);

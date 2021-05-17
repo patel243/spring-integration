@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ public final class JacksonJsonUtils {
 		if (JacksonPresent.isJackson2Present()) {
 			ObjectMapper mapper = new Jackson2JsonObjectMapper().getObjectMapper();
 
-			mapper.setDefaultTyping(new WhitelistTypeResolverBuilder(trustedPackages));
+			mapper.setDefaultTyping(new AllowListTypeResolverBuilder(trustedPackages));
 
 			GenericMessageJacksonDeserializer genericMessageDeserializer = new GenericMessageJacksonDeserializer();
 			genericMessageDeserializer.setMapper(mapper);
@@ -83,6 +83,7 @@ public final class JacksonJsonUtils {
 
 			SimpleModule simpleModule = new SimpleModule()
 					.addSerializer(new MessageHeadersJacksonSerializer())
+					.addSerializer(new MimeTypeSerializer())
 					.addDeserializer(GenericMessage.class, genericMessageDeserializer)
 					.addDeserializer(ErrorMessage.class, errorMessageDeserializer)
 					.addDeserializer(AdviceMessage.class, adviceMessageDeserializer)
@@ -98,7 +99,7 @@ public final class JacksonJsonUtils {
 
 	/**
 	 * An implementation of {@link ObjectMapper.DefaultTypeResolverBuilder}
-	 * that wraps a default {@link TypeIdResolver} to the {@link WhitelistTypeIdResolver}.
+	 * that wraps a default {@link TypeIdResolver} to the {@link AllowlistTypeIdResolver}.
 	 *
 	 * @author Rob Winch
 	 * @author Artem Bilan
@@ -107,13 +108,13 @@ public final class JacksonJsonUtils {
 	 *
 	 * @since 4.3.11
 	 */
-	private static final class WhitelistTypeResolverBuilder extends ObjectMapper.DefaultTypeResolverBuilder {
+	private static final class AllowListTypeResolverBuilder extends ObjectMapper.DefaultTypeResolverBuilder {
 
 		private static final long serialVersionUID = 1L;
 
 		private final String[] trustedPackages;
 
-		WhitelistTypeResolverBuilder(String... trustedPackages) {
+		AllowListTypeResolverBuilder(String... trustedPackages) {
 			super(ObjectMapper.DefaultTyping.NON_FINAL,
 					//we do explicit validation in the TypeIdResolver
 					BasicPolymorphicTypeValidator.builder()
@@ -133,14 +134,14 @@ public final class JacksonJsonUtils {
 				PolymorphicTypeValidator subtypeValidator,
 				Collection<NamedType> subtypes, boolean forSer, boolean forDeser) {
 			TypeIdResolver result = super.idResolver(config, baseType, subtypeValidator, subtypes, forSer, forDeser);
-			return new WhitelistTypeIdResolver(result, this.trustedPackages);
+			return new AllowlistTypeIdResolver(result, this.trustedPackages);
 		}
 
 	}
 
 	/**
 	 * A {@link TypeIdResolver} that delegates to an existing implementation
-	 * and throws an IllegalStateException if the class being looked up is not whitelisted,
+	 * and throws an IllegalStateException if the class being looked up is not trusted,
 	 * does not provide an explicit mixin mappings.
 	 *
 	 * @author Rob Winch
@@ -148,7 +149,7 @@ public final class JacksonJsonUtils {
 	 *
 	 * @since 4.3.11
 	 */
-	private static final class WhitelistTypeIdResolver implements TypeIdResolver {
+	private static final class AllowlistTypeIdResolver implements TypeIdResolver {
 
 		private static final List<String> TRUSTED_PACKAGES =
 				Arrays.asList(
@@ -164,16 +165,16 @@ public final class JacksonJsonUtils {
 
 		private final Set<String> trustedPackages = new LinkedHashSet<>(TRUSTED_PACKAGES);
 
-		WhitelistTypeIdResolver(TypeIdResolver delegate, String... trustedPackages) {
+		AllowlistTypeIdResolver(TypeIdResolver delegate, String... trustedPackages) {
 			this.delegate = delegate;
 			if (trustedPackages != null) {
-				for (String whiteListClass : trustedPackages) {
-					if ("*".equals(whiteListClass)) {
+				for (String trustedPackage : trustedPackages) {
+					if ("*".equals(trustedPackage)) {
 						this.trustedPackages.clear();
 						break;
 					}
 					else {
-						this.trustedPackages.add(whiteListClass);
+						this.trustedPackages.add(trustedPackage);
 					}
 				}
 			}
@@ -224,7 +225,10 @@ public final class JacksonJsonUtils {
 		private boolean isTrustedPackage(String packageName) {
 			if (!this.trustedPackages.isEmpty()) {
 				for (String trustedPackage : this.trustedPackages) {
-					if (packageName.equals(trustedPackage) || packageName.startsWith(trustedPackage + ".")) {
+					if (packageName.equals(trustedPackage) ||
+							(!packageName.equals("java.util.logging")
+									&& packageName.startsWith(trustedPackage + "."))) {
+
 						return true;
 					}
 				}

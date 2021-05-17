@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ public class KryoCodecTests {
 
 	@Test
 	public void testPojoSerialization() throws IOException {
-		PojoCodec codec = new PojoCodec();
+		PojoCodec codec = new PojoCodec(new KryoClassListRegistrar(SomeClassWithNoDefaultConstructors.class));
 		SomeClassWithNoDefaultConstructors foo = new SomeClassWithNoDefaultConstructors("foo", 123);
 		ByteArrayOutputStream bos = new ByteArrayOutputStream();
 		codec.encode(foo, bos);
@@ -101,7 +101,7 @@ public class KryoCodecTests {
 
 	@Test
 	public void testMapSerialization() throws IOException {
-		PojoCodec codec = new PojoCodec();
+		PojoCodec codec = new PojoCodec(new KryoClassListRegistrar(HashMap.class));
 		Map<String, Integer> map = new HashMap<>();
 		map.put("one", 1);
 		map.put("two", 2);
@@ -115,7 +115,7 @@ public class KryoCodecTests {
 
 	@Test
 	public void testComplexObjectSerialization() throws IOException {
-		PojoCodec codec = new PojoCodec();
+		PojoCodec codec = new PojoCodec(new KryoClassListRegistrar(Foo.class));
 		Foo foo = new Foo();
 		foo.put("one", 1);
 		foo.put("two", 2);

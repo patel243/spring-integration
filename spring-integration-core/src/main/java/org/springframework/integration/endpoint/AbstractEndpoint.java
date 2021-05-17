@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,11 +21,12 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
-import org.springframework.context.SmartLifecycle;
 import org.springframework.integration.context.IntegrationContextUtils;
 import org.springframework.integration.context.IntegrationObjectSupport;
 import org.springframework.integration.context.IntegrationProperties;
 import org.springframework.integration.support.SmartLifecycleRoleController;
+import org.springframework.integration.support.management.IntegrationManagedResource;
+import org.springframework.integration.support.management.ManageableSmartLifecycle;
 import org.springframework.util.PatternMatchUtils;
 import org.springframework.util.StringUtils;
 
@@ -44,16 +45,9 @@ import org.springframework.util.StringUtils;
  * @author Gary Russell
  * @author Artem Bilan
  */
+@IntegrationManagedResource
 public abstract class AbstractEndpoint extends IntegrationObjectSupport
-		implements SmartLifecycle, DisposableBean {
-
-	private boolean autoStartupSetExplicitly;
-
-	private volatile boolean autoStartup = true;
-
-	private volatile int phase = 0;
-
-	private volatile boolean running;
+		implements ManageableSmartLifecycle, DisposableBean {
 
 	protected final ReentrantLock lifecycleLock = new ReentrantLock(); // NOSONAR
 
@@ -62,6 +56,16 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 	private String role;
 
 	private SmartLifecycleRoleController roleController;
+
+	private boolean autoStartup = true;
+
+	private boolean autoStartupSetExplicitly;
+
+	private int phase = 0;
+
+	private volatile boolean running;
+
+	private volatile boolean active;
 
 	public void setAutoStartup(boolean autoStartup) {
 		this.autoStartup = autoStartup;
@@ -77,7 +81,7 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 	 * Such endpoints can be started/stopped as a group.
 	 * @param role the role for this endpoint.
 	 * @since 5.0
-	 * @see SmartLifecycle
+	 * @see org.springframework.context.SmartLifecycle
 	 * @see org.springframework.integration.support.SmartLifecycleRoleController
 	 */
 	public void setRole(String role) {
@@ -113,13 +117,14 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 				this.roleController.addLifecycleToRole(this.role, this);
 			}
 			catch (@SuppressWarnings("unused") NoSuchBeanDefinitionException e) {
-					this.logger.trace("No LifecycleRoleController in the context");
-				}
+				this.logger.trace("No LifecycleRoleController in the context");
+			}
 		}
 	}
 
 	@Override
 	public void destroy() {
+		stop();
 		if (this.roleController != null) {
 			this.roleController.removeLifecycle(this);
 		}
@@ -139,13 +144,7 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 
 	@Override
 	public final boolean isRunning() {
-		this.lifecycleLock.lock();
-		try {
-			return this.running;
-		}
-		finally {
-			this.lifecycleLock.unlock();
-		}
+		return this.running;
 	}
 
 	@Override
@@ -153,6 +152,7 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 		this.lifecycleLock.lock();
 		try {
 			if (!this.running) {
+				this.active = true;
 				doStart();
 				this.running = true;
 				if (logger.isInfoEnabled()) {
@@ -170,6 +170,7 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 		this.lifecycleLock.lock();
 		try {
 			if (this.running) {
+				this.active = false;
 				doStop();
 				this.running = false;
 				if (logger.isInfoEnabled()) {
@@ -187,6 +188,7 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 		this.lifecycleLock.lock();
 		try {
 			if (this.running) {
+				this.active = false;
 				doStop(callback);
 				this.running = false;
 				if (logger.isInfoEnabled()) {
@@ -209,6 +211,10 @@ public abstract class AbstractEndpoint extends IntegrationObjectSupport
 	protected void doStop(Runnable callback) {
 		doStop();
 		callback.run();
+	}
+
+	public boolean isActive() {
+		return this.active;
 	}
 
 	/**

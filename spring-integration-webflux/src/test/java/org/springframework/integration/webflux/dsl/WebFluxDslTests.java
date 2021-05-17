@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,12 +25,10 @@ import java.security.Principal;
 import java.time.Duration;
 import java.util.Collections;
 
-import javax.annotation.Resource;
-
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.hamcrest.Matchers;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.reactivestreams.Publisher;
 
 import org.springframework.beans.DirectFieldAccessor;
@@ -40,16 +38,20 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.ResolvableType;
 import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.reactive.ClientHttpConnector;
+import org.springframework.integration.channel.FixedSubscriberChannel;
 import org.springframework.integration.channel.QueueChannel;
 import org.springframework.integration.config.EnableIntegration;
 import org.springframework.integration.dsl.IntegrationFlow;
 import org.springframework.integration.dsl.IntegrationFlows;
 import org.springframework.integration.dsl.MessageChannels;
 import org.springframework.integration.dsl.context.IntegrationFlowContext;
+import org.springframework.integration.handler.AbstractReplyProducingMessageHandler;
 import org.springframework.integration.http.HttpHeaders;
 import org.springframework.integration.http.dsl.Http;
 import org.springframework.integration.support.MessageBuilder;
@@ -76,8 +78,7 @@ import org.springframework.security.test.web.reactive.server.SecurityMockServerC
 import org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers;
 import org.springframework.security.web.server.SecurityWebFilterChain;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.junit4.SpringRunner;
-import org.springframework.test.context.web.WebAppConfiguration;
+import org.springframework.test.context.junit.jupiter.web.SpringJUnitWebConfig;
 import org.springframework.test.web.reactive.server.HttpHandlerConnector;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.test.web.servlet.MockMvc;
@@ -104,8 +105,7 @@ import reactor.test.StepVerifier;
  *
  * @since 5.0
  */
-@RunWith(SpringRunner.class)
-@WebAppConfiguration
+@SpringJUnitWebConfig
 @DirtiesContext
 public class WebFluxDslTests {
 
@@ -119,7 +119,8 @@ public class WebFluxDslTests {
 	@Qualifier("webFluxWithReplyPayloadToFlux.handler")
 	private WebFluxRequestExecutingMessageHandler webFluxWithReplyPayloadToFlux;
 
-	@Resource(name = "httpReactiveProxyFlow.webflux:outbound-gateway#0")
+	@Autowired
+	@Qualifier("httpReactiveProxyFlow.webflux:outbound-gateway#0")
 	private WebFluxRequestExecutingMessageHandler httpReactiveProxyFlow;
 
 	@Autowired
@@ -130,7 +131,7 @@ public class WebFluxDslTests {
 
 	private WebTestClient webTestClient;
 
-	@Before
+	@BeforeEach
 	public void setup() {
 		this.mockMvc =
 				MockMvcBuilders.webAppContextSetup(this.wac)
@@ -141,7 +142,7 @@ public class WebFluxDslTests {
 				WebTestClient.bindToApplicationContext(this.wac)
 						.apply(SecurityMockServerConfigurers.springSecurity())
 						.configureClient()
-						.responseTimeout(Duration.ofSeconds(600))
+						.responseTimeout(Duration.ofSeconds(10))
 						.build();
 	}
 
@@ -174,11 +175,14 @@ public class WebFluxDslTests {
 
 		Message<?> receive = replyChannel.receive(10_000);
 
-		assertThat(receive).isNotNull();
-		assertThat(receive.getPayload()).isInstanceOf(Flux.class);
+		assertThat(receive).isNotNull()
+				.extracting(Message::getPayload)
+				.asInstanceOf(InstanceOfAssertFactories.type(ResponseEntity.class))
+				.extracting(HttpEntity<Flux<String>>::getBody)
+				.isInstanceOf(Flux.class);
 
 		@SuppressWarnings("unchecked")
-		Flux<String> response = (Flux<String>) receive.getPayload();
+		Flux<String> response = ((ResponseEntity<Flux<String>>) receive.getPayload()).getBody();
 
 		StepVerifier.create(response)
 				.expectNext("FOO", "BAR")
@@ -250,15 +254,12 @@ public class WebFluxDslTests {
 
 	@Test
 	public void testSse() {
-		Flux<String> responseBody =
-				this.webTestClient.get().uri("/sse")
-						.headers(headers -> headers.setBasicAuth("guest", "guest"))
-						.exchange()
-						.returnResult(String.class)
-						.getResponseBody();
-
-		StepVerifier
-				.create(responseBody)
+		this.webTestClient.get().uri("/sse")
+				.headers(headers -> headers.setBasicAuth("guest", "guest"))
+				.exchange()
+				.returnResult(String.class)
+				.getResponseBody()
+				.as(StepVerifier::create)
 				.expectNext("foo", "bar", "baz")
 				.verifyComplete();
 	}
@@ -320,6 +321,39 @@ public class WebFluxDslTests {
 		flowRegistration.destroy();
 	}
 
+	@Test
+	public void testErrorChannelFlow() {
+		IntegrationFlow flow =
+				IntegrationFlows.from(
+						WebFlux.inboundGateway("/errorFlow")
+								.errorChannel(new FixedSubscriberChannel(
+										new AbstractReplyProducingMessageHandler() {
+
+											@Override
+											protected Object handleRequestMessage(Message<?> requestMessage) {
+												return "Error Response";
+											}
+
+										})))
+						.channel(MessageChannels.flux())
+						.transform((payload) -> {
+							throw new RuntimeException("Error!");
+						})
+						.get();
+
+		IntegrationFlowContext.IntegrationFlowRegistration flowRegistration =
+				this.integrationFlowContext.registration(flow).register();
+
+		this.webTestClient.get().uri("/errorFlow")
+				.headers(headers -> headers.setBasicAuth("guest", "guest"))
+				.exchange()
+				.expectStatus()
+				.isOk()
+				.expectBody(String.class)
+				.isEqualTo("Error Response");
+
+		flowRegistration.destroy();
+	}
 
 	@Configuration
 	@EnableWebFlux
@@ -382,7 +416,8 @@ public class WebFluxDslTests {
 					.handle(WebFlux.outboundGateway("https://www.springsource.org/spring-integration")
 									.httpMethod(HttpMethod.GET)
 									.replyPayloadToFlux(true)
-									.expectedResponseType(String.class),
+									.expectedResponseType(String.class)
+									.extractResponseBody(false),
 							e -> e
 									.id("webFluxWithReplyPayloadToFlux")
 									.customizeMonoReply(
@@ -450,7 +485,7 @@ public class WebFluxDslTests {
 					.from(WebFlux.inboundGateway("/sse")
 							.requestMapping(m -> m.produces(MediaType.TEXT_EVENT_STREAM_VALUE))
 							.mappedResponseHeaders("*"))
-					.enrichHeaders(Collections.singletonMap("aHeader", new String[] { "foo", "bar", "baz" }))
+					.enrichHeaders(Collections.singletonMap("aHeader", new String[]{ "foo", "bar", "baz" }))
 					.handle((p, h) -> Flux.fromArray(h.get("aHeader", String[].class)))
 					.get();
 		}

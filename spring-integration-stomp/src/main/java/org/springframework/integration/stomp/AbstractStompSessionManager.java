@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -198,7 +198,24 @@ public abstract class AbstractStompSessionManager implements StompSessionManager
 			}
 			return;
 		}
-		final CountDownLatch connectLatch = new CountDownLatch(1);
+		CountDownLatch connectLatch = addStompSessionCallback(currentEpoch);
+
+		try {
+			if (!connectLatch.await(30, TimeUnit.SECONDS)) {
+				this.logger.error("No response to connection attempt");
+				if (currentEpoch == this.epoch.get()) {
+					scheduleReconnect(null);
+				}
+			}
+		}
+		catch (InterruptedException e1) {
+			this.logger.error("Interrupted while waiting for connection attempt");
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	private CountDownLatch addStompSessionCallback(int currentEpoch) {
+		CountDownLatch connectLatch = new CountDownLatch(1);
 		this.stompSessionListenableFuture.addCallback(
 				stompSession -> {
 					AbstractStompSessionManager.this.logger.debug("onSuccess");
@@ -222,19 +239,7 @@ public abstract class AbstractStompSessionManager implements StompSessionManager
 						scheduleReconnect(e);
 					}
 				});
-
-		try {
-			if (!connectLatch.await(30, TimeUnit.SECONDS)) {
-				this.logger.error("No response to connection attempt");
-				if (currentEpoch == this.epoch.get()) {
-					scheduleReconnect(null);
-				}
-			}
-		}
-		catch (InterruptedException e1) {
-			this.logger.error("Interrupted while waiting for connection attempt");
-			Thread.currentThread().interrupt();
-		}
+		return connectLatch;
 	}
 
 	private void scheduleReconnect(Throwable e) {

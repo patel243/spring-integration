@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2020 the original author or authors.
+ * Copyright 2017-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,29 +27,13 @@ import org.springframework.util.ClassUtils;
  */
 public final class JacksonPresent {
 
-	private static final ClassLoader CLASS_LOADER = ClassUtils.getDefaultClassLoader();
-
-	private static final boolean jackson2Present =
-			ClassUtils.isPresent("com.fasterxml.jackson.databind.ObjectMapper", CLASS_LOADER) &&
-					ClassUtils.isPresent("com.fasterxml.jackson.core.JsonGenerator", CLASS_LOADER);
-
-	private static final boolean jacksonPresent =
-			ClassUtils.isPresent("org.codehaus.jackson.map.ObjectMapper", CLASS_LOADER) &&
-					ClassUtils.isPresent("org.codehaus.jackson.JsonGenerator", CLASS_LOADER);
+	private static final boolean JACKSON_2_PRESENT =
+			ClassUtils.isPresent("com.fasterxml.jackson.databind.ObjectMapper", null) &&
+					ClassUtils.isPresent("com.fasterxml.jackson.core.JsonGenerator", null);
 
 	public static boolean isJackson2Present() {
-		return jackson2Present;
+		return JACKSON_2_PRESENT;
 	}
-
-	/**
-	 * @return true if Jackson 1.x is present on classpath
-	 * @deprecated Jackson 1.x is not supported any more. Use Jackson 2.x.
-	 */
-	@Deprecated
-	public static boolean isJacksonPresent() {
-		return jacksonPresent;
-	}
-
 
 	private JacksonPresent() {
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2020 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import java.util.UUID;
 import java.util.concurrent.ScheduledFuture;
 
 import org.springframework.amqp.core.MessageDeliveryMode;
+import org.springframework.amqp.core.ReturnedMessage;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
@@ -31,7 +32,6 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.factory.BeanFactory;
-import org.springframework.context.Lifecycle;
 import org.springframework.expression.Expression;
 import org.springframework.integration.amqp.support.AmqpHeaderMapper;
 import org.springframework.integration.amqp.support.DefaultAmqpHeaderMapper;
@@ -45,6 +45,7 @@ import org.springframework.integration.mapping.AbstractHeaderMapper;
 import org.springframework.integration.support.AbstractIntegrationMessageBuilder;
 import org.springframework.integration.support.DefaultErrorMessageStrategy;
 import org.springframework.integration.support.ErrorMessageStrategy;
+import org.springframework.integration.support.management.ManageableLifecycle;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
@@ -60,9 +61,9 @@ import org.springframework.util.concurrent.SettableListenableFuture;
  *
  */
 public abstract class AbstractAmqpOutboundEndpoint extends AbstractReplyProducingMessageHandler
-		implements Lifecycle {
+		implements ManageableLifecycle {
 
-	private static final UUID NO_ID = new UUID(0L, 0L);
+	private static final String NO_ID = new UUID(0L, 0L).toString();
 
 	private String exchangeName;
 
@@ -493,8 +494,8 @@ public abstract class AbstractAmqpOutboundEndpoint extends AbstractReplyProducin
 						connection.close();
 					}
 				}
-				catch (RuntimeException e) {
-					logger.error("Failed to eagerly establish the connection.", e);
+				catch (RuntimeException ex) {
+					logger.error(ex, "Failed to eagerly establish the connection.");
 				}
 			}
 			doStart();
@@ -547,18 +548,31 @@ public abstract class AbstractAmqpOutboundEndpoint extends AbstractReplyProducin
 
 	protected CorrelationData generateCorrelationData(Message<?> requestMessage) {
 		CorrelationData correlationData = null;
+		UUID uuid = requestMessage.getHeaders().getId();
+		String messageId;
+		if (uuid == null) {
+			messageId = NO_ID;
+		}
+		else {
+			messageId = uuid.toString();
+		}
 		if (this.correlationDataGenerator != null) {
-			UUID messageId = requestMessage.getHeaders().getId();
-			if (messageId == null) {
-				messageId = NO_ID;
-			}
 			Object userData = this.correlationDataGenerator.processMessage(requestMessage);
 			if (userData != null) {
-				correlationData = new CorrelationDataWrapper(messageId.toString(), userData, requestMessage);
+				correlationData = new CorrelationDataWrapper(messageId, userData, requestMessage);
 			}
 			else {
 				this.logger.debug("'confirmCorrelationExpression' resolved to 'null'; "
 						+ "no publisher confirm will be sent to the ack or nack channel");
+			}
+		}
+		if (correlationData == null) {
+			Object correlation = requestMessage.getHeaders().get(AmqpHeaders.PUBLISH_CONFIRM_CORRELATION);
+			if (correlation instanceof CorrelationData) {
+				correlationData = (CorrelationData) correlation;
+			}
+			if (correlationData != null) {
+				correlationData = new CorrelationDataWrapper(messageId, correlationData, requestMessage);
 			}
 		}
 		return correlationData;
@@ -602,48 +616,64 @@ public abstract class AbstractAmqpOutboundEndpoint extends AbstractReplyProducin
 				: getMessageBuilderFactory().withPayload(replyObject);
 	}
 
+	/**
+	 * Build Spring message object based on the provided returned AMQP message info.
+	 * @param message the returned AMQP message
+	 * @param replyCode the returned message reason code
+	 * @param replyText the returned message reason text
+	 * @param exchange the exchange the message returned from
+	 * @param returnedRoutingKey the routing key for returned message
+	 * @param converter the converter to deserialize body of the returned AMQP message
+	 * @return the Spring message which represents a returned AMQP message
+	 * @deprecated since 5.4 in favor of {@link #buildReturnedMessage(ReturnedMessage, MessageConverter)}
+	 */
+	@Deprecated
 	protected Message<?> buildReturnedMessage(org.springframework.amqp.core.Message message,
 			int replyCode, String replyText, String exchange, String returnedRoutingKey, MessageConverter converter) {
 
-		Object returnedObject = converter.fromMessage(message);
+		return buildReturnedMessage(new ReturnedMessage(message, replyCode, replyText, exchange, returnedRoutingKey),
+				converter);
+	}
+
+	protected Message<?> buildReturnedMessage(ReturnedMessage returnedMessage, MessageConverter converter) {
+		org.springframework.amqp.core.Message amqpMessage = returnedMessage.getMessage();
+		Object returnedObject = converter.fromMessage(amqpMessage);
 		AbstractIntegrationMessageBuilder<?> builder = prepareMessageBuilder(returnedObject);
-		Map<String, ?> headers = getHeaderMapper().toHeadersFromReply(message.getMessageProperties());
+		Map<String, ?> headers = getHeaderMapper().toHeadersFromReply(amqpMessage.getMessageProperties());
 		if (this.errorMessageStrategy == null) {
 			builder.copyHeadersIfAbsent(headers)
-					.setHeader(AmqpHeaders.RETURN_REPLY_CODE, replyCode)
-					.setHeader(AmqpHeaders.RETURN_REPLY_TEXT, replyText)
-					.setHeader(AmqpHeaders.RETURN_EXCHANGE, exchange)
-					.setHeader(AmqpHeaders.RETURN_ROUTING_KEY, returnedRoutingKey);
+					.setHeader(AmqpHeaders.RETURN_REPLY_CODE, returnedMessage.getReplyCode())
+					.setHeader(AmqpHeaders.RETURN_REPLY_TEXT, returnedMessage.getReplyText())
+					.setHeader(AmqpHeaders.RETURN_EXCHANGE, returnedMessage.getExchange())
+					.setHeader(AmqpHeaders.RETURN_ROUTING_KEY, returnedMessage.getRoutingKey());
 		}
-		Message<?> returnedMessage = builder.build();
+		Message<?> message = builder.build();
 		if (this.errorMessageStrategy != null) {
-			returnedMessage = this.errorMessageStrategy.buildErrorMessage(new ReturnedAmqpMessageException(
-					returnedMessage, message, replyCode, replyText, exchange, returnedRoutingKey), null);
+			message = this.errorMessageStrategy.buildErrorMessage(new ReturnedAmqpMessageException(
+					message, amqpMessage, returnedMessage.getReplyCode(), returnedMessage.getReplyText(),
+					returnedMessage.getExchange(), returnedMessage.getRoutingKey()), null);
 		}
-		return returnedMessage;
+		return message;
 	}
 
 	protected void handleConfirm(CorrelationData correlationData, boolean ack, String cause) {
 		CorrelationDataWrapper wrapper = (CorrelationDataWrapper) correlationData;
 		if (correlationData == null) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("No correlation data provided for ack: " + ack + " cause:" + cause);
-			}
+			logger.debug(() -> "No correlation data provided for ack: " + ack + " cause:" + cause);
 			return;
 		}
 		Object userCorrelationData = wrapper.getUserData();
-		Message<?> confirmMessage;
-		confirmMessage = buildConfirmMessage(ack, cause, wrapper, userCorrelationData);
-		if (ack && getConfirmAckChannel() != null) {
-			sendOutput(confirmMessage, getConfirmAckChannel(), true);
-		}
-		else if (!ack && getConfirmNackChannel() != null) {
-			sendOutput(confirmMessage, getConfirmNackChannel(), true);
+		MessageChannel ackChannel = getConfirmAckChannel();
+		if (ack && ackChannel != null) {
+			sendOutput(buildConfirmMessage(ack, cause, wrapper, userCorrelationData), ackChannel, true);
 		}
 		else {
-			if (logger.isInfoEnabled()) {
-				logger.info("Nowhere to send publisher confirm "
-						+ (ack ? "ack" : "nack") + " for "
+			MessageChannel nackChannel = getConfirmNackChannel();
+			if (!ack && nackChannel != null) {
+				sendOutput(buildConfirmMessage(ack, cause, wrapper, userCorrelationData), nackChannel, true);
+			}
+			else {
+				logger.debug(() -> "Nowhere to send publisher confirm " + (ack ? "ack" : "nack") + " for "
 						+ userCorrelationData);
 			}
 		}
@@ -700,11 +730,20 @@ public abstract class AbstractAmqpOutboundEndpoint extends AbstractReplyProducin
 		}
 
 		@Override
+		@Deprecated
 		public void setReturnedMessage(org.springframework.amqp.core.Message returnedMessage) {
 			if (this.userData instanceof CorrelationData) {
 				((CorrelationData) this.userData).setReturnedMessage(returnedMessage);
 			}
 			super.setReturnedMessage(returnedMessage);
+		}
+
+		@Override
+		public void setReturned(ReturnedMessage returned) {
+			if (this.userData instanceof CorrelationData) {
+				((CorrelationData) this.userData).setReturned(returned);
+			}
+			super.setReturned(returned);
 		}
 
 	}

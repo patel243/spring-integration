@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -162,7 +162,7 @@ public abstract class AbstractMessageProducingHandler extends AbstractMessageHan
 		}
 
 		if (headerPatterns.contains("*")) {
-			this.notPropagatedHeaders = new String[] { "*" };
+			this.notPropagatedHeaders = new String[]{ "*" };
 			this.noHeadersPropagation = true;
 		}
 
@@ -299,20 +299,25 @@ public abstract class AbstractMessageProducingHandler extends AbstractMessageHan
 	}
 
 	private void doProduceOutput(Message<?> requestMessage, MessageHeaders requestHeaders, Object reply,
-			@Nullable Object replyChannel) {
+			@Nullable Object replyChannelArg) {
+
+		Object replyChannel = replyChannelArg;
+		if (replyChannel == null) {
+			replyChannel = getOutputChannel();
+		}
 
 		if (this.async && (reply instanceof ListenableFuture<?> || reply instanceof Publisher<?>)) {
-			MessageChannel messageChannel = getOutputChannel();
-			if (reply instanceof ListenableFuture<?> ||
-					!(messageChannel instanceof ReactiveStreamsSubscribableChannel)) {
-				asyncNonReactiveReply(requestMessage, reply, replyChannel);
-			}
-			else {
-				((ReactiveStreamsSubscribableChannel) messageChannel)
+			if (reply instanceof Publisher<?> &&
+					replyChannel instanceof ReactiveStreamsSubscribableChannel) {
+
+				((ReactiveStreamsSubscribableChannel) replyChannel)
 						.subscribeTo(
 								Flux.from((Publisher<?>) reply)
 										.doOnError((ex) -> sendErrorMessage(requestMessage, ex))
 										.map(result -> createOutputMessage(result, requestHeaders)));
+			}
+			else {
+				asyncNonReactiveReply(requestMessage, reply, replyChannel);
 			}
 		}
 		else {
@@ -406,15 +411,19 @@ public abstract class AbstractMessageProducingHandler extends AbstractMessageHan
 			if (this.noHeadersPropagation || !shouldCopyRequestHeaders()) {
 				return (Message<?>) output;
 			}
-			builder = this.getMessageBuilderFactory().fromMessage((Message<?>) output);
+			builder = getMessageBuilderFactory().fromMessage((Message<?>) output);
 		}
 		else if (output instanceof AbstractIntegrationMessageBuilder) {
 			builder = (AbstractIntegrationMessageBuilder<?>) output;
 		}
 		else {
-			builder = this.getMessageBuilderFactory().withPayload(output);
+			builder = getMessageBuilderFactory().withPayload(output);
 		}
-		if (!this.noHeadersPropagation && shouldCopyRequestHeaders()) {
+		if (!this.noHeadersPropagation &&
+				(shouldCopyRequestHeaders() ||
+						(!(output instanceof Message<?>) &&
+								!(output instanceof AbstractIntegrationMessageBuilder<?>)))) {
+
 			builder.filterAndCopyHeadersIfAbsent(requestHeaders,
 					this.selectiveHeaderPropagation ? this.notPropagatedHeaders : null);
 		}
@@ -476,8 +485,8 @@ public abstract class AbstractMessageProducingHandler extends AbstractMessageHan
 			result = new MessageHandlingException(requestMessage, ex);
 		}
 		if (errorChannel == null) {
-			logger.error("Async exception received and no 'errorChannel' header exists and no default "
-					+ "'errorChannel' found", result);
+			logger.error(result,
+					"Async exception received and no 'errorChannel' header exists and no default 'errorChannel' found");
 		}
 		else {
 			try {
@@ -487,7 +496,7 @@ public abstract class AbstractMessageProducingHandler extends AbstractMessageHan
 				Exception exceptionToLog =
 						IntegrationUtils.wrapInHandlingExceptionIfNecessary(requestMessage,
 								() -> "failed to send error message in the [" + this + ']', e);
-				logger.error("Failed to send async reply", exceptionToLog);
+				logger.error(exceptionToLog, "Failed to send async reply");
 			}
 		}
 	}
@@ -533,7 +542,7 @@ public abstract class AbstractMessageProducingHandler extends AbstractMessageHan
 						exceptionToLogAndSend = new MessagingException(replyMessage, exceptionToLogAndSend);
 					}
 				}
-				logger.error("Failed to send async reply: " + result.toString(), exceptionToLogAndSend);
+				logger.error(exceptionToLogAndSend, () -> "Failed to send async reply: " + result.toString());
 				onFailure(exceptionToLogAndSend);
 			}
 		}

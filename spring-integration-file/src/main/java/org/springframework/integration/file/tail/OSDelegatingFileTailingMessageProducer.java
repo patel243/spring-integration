@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,36 +33,36 @@ import org.springframework.util.Assert;
  * @author Gary Russell
  * @author Gavin Gray
  * @author Ali Shahbour
+ * @author Artem Bilan
+ * @author Trung Pham
+ *
  * @since 3.0
  *
  */
 public class OSDelegatingFileTailingMessageProducer extends FileTailingMessageProducerSupport
 		implements SchedulingAwareRunnable {
 
-	private volatile Process nativeTailProcess;
+	private boolean enableStatusReader = true;
 
-	private volatile String options = "-F -n 0";
+	private String options = "-F -n 0";
 
 	private volatile String command = "ADAPTER_NOT_INITIALIZED";
 
-	private volatile boolean enableStatusReader = true;
+	private volatile String[] tailCommand;
+
+	private volatile Process nativeTailProcess;
 
 	private volatile BufferedReader stdOutReader;
 
 	public void setOptions(String options) {
-		if (options == null) {
-			this.options = "";
-		}
-		else {
-			this.options = options;
-		}
+		this.options = options == null ? "" : options;
 	}
 
 	/**
 	 * If false, thread for capturing stderr will not be started
 	 * and stderr output will be ignored
 	 * @param enableStatusReader true or false
-     * @since 4.3.6
+	 * @since 4.3.6
 	 */
 	public void setEnableStatusReader(boolean enableStatusReader) {
 		this.enableStatusReader = enableStatusReader;
@@ -84,16 +84,21 @@ public class OSDelegatingFileTailingMessageProducer extends FileTailingMessagePr
 
 	@Override
 	protected void onInit() {
-		Assert.notNull(getFile(), "File cannot be null");
 		super.onInit();
+		Assert.notNull(getFile(), "File cannot be null");
 	}
 
 	@Override
 	protected void doStart() {
 		super.doStart();
 		destroyProcess();
-		this.command = "tail " + this.options + " " + this.getFile().getAbsolutePath();
-		this.getTaskExecutor().execute(this::runExec);
+		String[] tailOptions = this.options.split("\\s+");
+		this.tailCommand = new String[tailOptions.length + 2];
+		this.tailCommand[0] = "tail";
+		this.tailCommand[this.tailCommand.length - 1] = getFile().getAbsolutePath();
+		System.arraycopy(tailOptions, 0, this.tailCommand, 1, tailOptions.length);
+		this.command = String.join(" ", this.tailCommand);
+		getTaskExecutor().execute(this::runExec);
 	}
 
 	@Override
@@ -114,20 +119,18 @@ public class OSDelegatingFileTailingMessageProducer extends FileTailingMessagePr
 	 * Exec the native tail process.
 	 */
 	private void runExec() {
-		this.destroyProcess();
-		if (logger.isInfoEnabled()) {
-			logger.info("Starting tail process");
-		}
+		destroyProcess();
+		logger.info("Starting tail process");
 		try {
-			Process process = Runtime.getRuntime().exec(this.command);
+			Process process = Runtime.getRuntime().exec(this.tailCommand);
 			BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
 			this.nativeTailProcess = process;
-			this.startProcessMonitor();
+			startProcessMonitor();
 			if (this.enableStatusReader) {
 				startStatusReader();
 			}
 			this.stdOutReader = reader;
-			this.getTaskExecutor().execute(this);
+			getTaskExecutor().execute(this);
 		}
 		catch (IOException e) {
 			throw new MessagingException("Failed to exec tail command: '" + this.command + "'", e);
@@ -139,41 +142,34 @@ public class OSDelegatingFileTailingMessageProducer extends FileTailingMessagePr
 	 * Runs a thread that waits for the Process result.
 	 */
 	private void startProcessMonitor() {
-		this.getTaskExecutor().execute(() -> {
-			Process process = OSDelegatingFileTailingMessageProducer.this.nativeTailProcess;
-			if (process == null) {
-				if (logger.isDebugEnabled()) {
-					logger.debug("Process destroyed before starting process monitor");
-				}
-				return;
-			}
+		getTaskExecutor()
+				.execute(() -> {
+					Process process = OSDelegatingFileTailingMessageProducer.this.nativeTailProcess;
+					if (process == null) {
+						logger.debug("Process destroyed before starting process monitor");
+						return;
+					}
 
-			int result = Integer.MIN_VALUE;
-			try {
-				if (logger.isDebugEnabled()) {
-					logger.debug("Monitoring process " + process);
-				}
-				result = process.waitFor();
-				if (logger.isInfoEnabled()) {
-					logger.info("tail process terminated with value " + result);
-				}
-			}
-			catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				logger.error("Interrupted - stopping adapter", e);
-				stop();
-			}
-			finally {
-				destroyProcess();
-			}
-			if (isRunning()) {
-				if (logger.isInfoEnabled()) {
-					logger.info("Restarting tail process in " + getMissingFileDelay() + " milliseconds");
-				}
-				getTaskScheduler()
-						.schedule(this::runExec, new Date(System.currentTimeMillis() + getMissingFileDelay()));
-			}
-		});
+					int result;
+					try {
+						logger.debug(() -> "Monitoring process " + process);
+						result = process.waitFor();
+						logger.info(() -> "tail process terminated with value " + result);
+					}
+					catch (InterruptedException ex) {
+						Thread.currentThread().interrupt();
+						logger.error(ex, "Interrupted - stopping adapter");
+						stop();
+					}
+					finally {
+						destroyProcess();
+					}
+					if (isRunning()) {
+						logger.info(() -> "Restarting tail process in " + getMissingFileDelay() + " milliseconds");
+						getTaskScheduler()
+								.schedule(this::runExec, new Date(System.currentTimeMillis() + getMissingFileDelay()));
+					}
+				});
 	}
 
 	/**
@@ -183,41 +179,32 @@ public class OSDelegatingFileTailingMessageProducer extends FileTailingMessagePr
 	private void startStatusReader() {
 		Process process = this.nativeTailProcess;
 		if (process == null) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Process destroyed before starting stderr reader");
-			}
+			logger.debug("Process destroyed before starting stderr reader");
 			return;
 		}
-		this.getTaskExecutor().execute(() -> {
-			BufferedReader errorReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
-			String statusMessage;
-			if (logger.isDebugEnabled()) {
-				logger.debug("Reading stderr");
-			}
-			try {
-				while ((statusMessage = errorReader.readLine()) != null) {
-					publish(statusMessage);
-					if (logger.isTraceEnabled()) {
-						logger.trace(statusMessage);
+		getTaskExecutor()
+				.execute(() -> {
+					BufferedReader errorReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+					String statusMessage;
+					logger.debug("Reading stderr");
+					try {
+						while ((statusMessage = errorReader.readLine()) != null) {
+							publish(statusMessage);
+							logger.trace(statusMessage);
+						}
 					}
-				}
-			}
-			catch (IOException e1) {
-				if (logger.isDebugEnabled()) {
-					logger.debug("Exception on tail error reader", e1);
-				}
-			}
-			finally {
-				try {
-					errorReader.close();
-				}
-				catch (IOException e2) {
-					if (logger.isDebugEnabled()) {
-						logger.debug("Exception while closing stderr", e2);
+					catch (IOException e1) {
+						logger.debug(e1, "Exception on tail error reader");
 					}
-				}
-			}
-		});
+					finally {
+						try {
+							errorReader.close();
+						}
+						catch (IOException e2) {
+							logger.debug(e2, "Exception while closing stderr");
+						}
+					}
+				});
 	}
 
 	/**
@@ -227,26 +214,20 @@ public class OSDelegatingFileTailingMessageProducer extends FileTailingMessagePr
 	public void run() {
 		String line;
 		try {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Reading stdout");
-			}
+			logger.debug("Reading stdout");
 			while ((line = this.stdOutReader.readLine()) != null) {
-				this.send(line);
+				send(line);
 			}
 		}
-		catch (IOException e) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Exception on tail reader", e);
-			}
+		catch (IOException ex) {
+			logger.debug(ex, "Exception on tail reader");
 			try {
 				this.stdOutReader.close();
 			}
 			catch (IOException e1) {
-				if (logger.isDebugEnabled()) {
-					logger.debug("Exception while closing stdout", e);
-				}
+				logger.debug(e1, "Exception while closing stdout");
 			}
-			this.destroyProcess();
+			destroyProcess();
 		}
 	}
 

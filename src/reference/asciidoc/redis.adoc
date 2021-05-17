@@ -7,8 +7,8 @@ This support comes in the form of a Redis-based `MessageStore` as well as publis
 You need to include this dependency into your project:
 
 ====
+[source, xml, subs="normal", role="primary"]
 .Maven
-[source, xml, subs="normal"]
 ----
 <dependency>
     <groupId>org.springframework.integration</groupId>
@@ -17,8 +17,8 @@ You need to include this dependency into your project:
 </dependency>
 ----
 
+[source, groovy, subs="normal", role="secondary"]
 .Gradle
-[source, groovy, subs="normal"]
 ----
 compile "org.springframework.integration:spring-integration-redis:{project-version}"
 ----
@@ -367,9 +367,11 @@ However, if you want to use a different serialization technique (such as JSON), 
 
 Starting with version 4.3.10, the Framework provides Jackson serializer and deserializer implementations for `Message` instances and `MessageHeaders` instances -- `MessageJacksonDeserializer` and `MessageHeadersJacksonSerializer`, respectively.
 They have to be configured with the `SimpleModule` options for the `ObjectMapper`.
-In addition, you should set `enableDefaultTyping` on the `ObjectMapper` to add type information for each serialized complex object.
+In addition, you should set `enableDefaultTyping` on the `ObjectMapper` to add type information for each serialized complex object (if you trust the source).
 That type information is then used during deserialization.
 The framework provides a utility method called `JacksonJsonUtils.messagingAwareMapper()`, which is already supplied with all the previously mentioned properties and serializers.
+This utility method comes with the `trustedPackages` argument to limit Java packages for deserialization to avoid security vulnerabilities.
+The default trusted packages: `java.util`, `java.lang`, `org.springframework.messaging.support`, `org.springframework.integration.support`, `org.springframework.integration.message`, `org.springframework.integration.store`.
 To manage JSON serialization in the `RedisMessageStore`, you must configure it in a fashion similar to the following example:
 
 ====
@@ -505,7 +507,7 @@ For example, if the store is written to using a Redis store outbound adapter tha
 ----
 ====
 
-Th `RedisTemplate` uses `String` serializers for keys and hash keys and the default JDK Serialization serializers for values and hash values.
+The `RedisTemplate` uses `String` serializers for keys and hash keys and the default JDK Serialization serializers for values and hash values.
 =====
 
 Because it has a literal value for the `key`, the preceding example is relatively simple and static.
@@ -652,7 +654,7 @@ If you provide neither attribute, the `payload` is used as the command arguments
 ====
 
 You can use the `<int-redis:outbound-gateway>` as a common component to perform any desired Redis operation.
-For example, the following examlpe shows how to get incremented values from Redis atomic number:
+The following example shows how to get incremented values from Redis atomic number:
 
 ====
 [source,xml]
@@ -737,9 +739,10 @@ The following listing shows the available attributes for a Redis queue inbound g
         recovery-interval=""/>  <11>
 ----
 
-<1> The `MessageChannel` from which this endpoint receives `Message` instances.
-<2> The `MessageChannel` where this endpoint sends reply `Message` instances.
-<3> A reference to a Spring `TaskExecutor` (or a standard JDK 1.5+ `Executor`) bean.
+<1> The `MessageChannel` where this endpoint sends `Message` instances created from the Redis data.
+<2> The `MessageChannel` from where this endpoint waits for reply `Message` instances.
+Optional - the `replyChannel` header is still in use.
+<3> A reference to a Spring `TaskExecutor` (or a standard JDK `Executor`) bean.
 It is used for the underlying listening task.
 It defaults to a `SimpleAsyncTaskExecutor`.
 <4> The timeout (in milliseconds) to wait until the reply message is sent.
@@ -765,6 +768,100 @@ If this attribute is set to `true`, the `serializer` cannot be an empty string, 
 IMPORTANT: The `task-executor` has to be configured with more than one thread for processing; otherwise there is a possible deadlock when the `RedisQueueMessageDrivenEndpoint` tries to restart the listener task after an error.
 The `errorChannel` can be used to process those errors, to avoid restarts, but it preferable to not expose your application to the possible deadlock situation.
 See Spring Framework https://docs.spring.io/spring/docs/current/spring-framework-reference/integration.html#scheduling-task-executor-types[Reference Manual] for possible `TaskExecutor` implementations.
+
+[[redis-stream-outbound]]
+=== Redis Stream Outbound Channel Adapter
+
+Spring Integration 5.4 introduced Reactive Redis Stream outbound channel adapter to write Message payload into Redis stream.
+Outbound Channel adapter uses `ReactiveStreamOperations.add(...)` to add a  `Record` to the stream.
+The following example shows how to use Java configuration and Service class for Redis Stream Outbound Channel Adapter.
+
+====
+[source,java]
+----
+@Bean
+@ServiceActivator(inputChannel = "messageChannel")
+public ReactiveRedisStreamMessageHandler reactiveValidatorMessageHandler(
+        ReactiveRedisConnectionFactory reactiveRedisConnectionFactory) {
+    ReactiveRedisStreamMessageHandler reactiveStreamMessageHandler =
+        new ReactiveRedisStreamMessageHandler(reactiveRedisConnectionFactory, "myStreamKey"); <1>
+    reactiveRedisStreamMessageHandler.setSerializationContext(serializationContext); <2>
+    reactiveRedisStreamMessageHandler.setHashMapper(hashMapper); <3>
+    reactiveRedisStreamMessageHandler.setExtractPayload(true); <4>
+}
+----
+<1> Construct an instance of `ReactiveRedisStreamMessageHandler` using `ReactiveRedisConnectionFactory` and stream name to add records.
+Another constructor variant is based on a SpEL expression to evaluate a stream key against a request message.
+<2> Set a `RedisSerializationContext` used to serialize a record key and value before adding to the stream.
+<3> Set `HashMapper` which provides contract between Java types and Redis hashes/maps.
+<4> If 'true', channel adapter will extract payload from a request message for a stream record to add.
+Or use the whole message as a value.
+It defaults to `true`.
+====
+
+[[redis-stream-inbound]]
+=== Redis Stream Inbound Channel Adapter
+
+Spring Integration 5.4 introduced the Reactive Stream inbound channel adapter for reading messages from a Redis Stream.
+Inbound channel adapter uses `StreamReceiver.receive(...)` or `StreamReceiver.receiveAutoAck()` based on auto acknowledgement flag to read record from Redis stream.
+The following example shows how to use Java configuration for Redis Stream Inbound Channel Adapter.
+
+====
+[source,java]
+----
+@Bean
+public ReactiveRedisStreamMessageProducer reactiveRedisStreamProducer(
+       ReactiveRedisConnectionFactory reactiveRedisConnectionFactory) {
+ReactiveRedisStreamMessageProducer messageProducer =
+            new ReactiveRedisStreamMessageProducer(reactiveRedisConnectionFactory, "myStreamKey"); <1>
+    messageProducer.setStreamReceiverOptions( <2>
+                StreamReceiver.StreamReceiverOptions.builder()
+                      .pollTimeout(Duration.ofMillis(100))
+                      .build());
+    messageProducer.setAutoStartup(true); <3>
+    messageProducer.setAutoAck(false); <4>
+    messageProducer.setCreateConsumerGroup(true); <5>
+    messageProducer.setConsumerGroup("my-group"); <6>
+    messageProducer.setConsumerName("my-consumer"); <7>
+    messageProducer.setOutputChannel(fromRedisStreamChannel); <8>
+    messageProducer.setReadOffset(ReadOffset.latest()); <9>
+    messageProducer.extractPayload(true); <10>
+    return messageProducer;
+}
+----
+<1> Construct an instance of `ReactiveRedisStreamMessageProducer` using `ReactiveRedisConnectionFactory` and stream key to read records.
+<2> A `StreamReceiver.StreamReceiverOptions` to consume redis stream using reactive infrastructure.
+<3> A `SmartLifecycle` attribute to specify whether this endpoint should start automatically after the application context start or not.
+It defaults to `true`.
+If `false`, `RedisStreamMessageProducer` should be started manually `messageProducer.start()`.
+<4> If `false`, received messages are not auto acknowledged.
+The acknowledgement of the message will be deferred to the client consuming message.
+It defaults to `true`.
+<5> If `true`, a consumer group will be created.
+During creation of consumer group stream will be created (if not exists yet), too.
+Consumer group track message delivery and distinguish between consumers.
+It defaults to `false`.
+<6> Set Consumer Group name.
+It defaults to the defined bean name.
+<7> Set Consumer name.
+Reads message as `my-consumer` from group `my-group`.
+<8> The message channel to which to send messages from this endpoint.
+<9> Define the offset to read message.
+It defaults to `ReadOffset.latest()`.
+<10> If 'true', channel adapter will extract payload value from the `Record`.
+Otherwise the whole `Record` is used as a payload.
+It defaults to `true`.
+====
+
+If the `autoAck` is set to `false`, the `Record` in Redis Stream is not acknowledge automatically by the Redis driver, instead an `IntegrationMessageHeaderAccessor.ACKNOWLEDGMENT_CALLBACK` header is added into a message to produce with a `SimpleAcknowledgment` instance as a value.
+It is a target integration flow responsibility to call its `acknowledge()` callback whenever the business logic is done for the message based on such a record.
+Similar logic is required even when an exception happens during deserialization and `errorChannel` is configured.
+So, target error handler must decided to ack or nack such a failed message.
+Alongside with `IntegrationMessageHeaderAccessor.ACKNOWLEDGMENT_CALLBACK`, the `ReactiveRedisStreamMessageProducer` also populates these headers into the message to produce: `RedisHeaders.STREAM_KEY`, `RedisHeaders.STREAM_MESSAGE_ID`, `RedisHeaders.CONSUMER_GROUP` and `RedisHeaders.CONSUMER`.
+
+Starting with version 5.5, you can configure `StreamReceiver.StreamReceiverOptionsBuilder` options explicitly on the `ReactiveRedisStreamMessageProducer`, including the newly introduced `onErrorResume` function, which is required if the Redis Stream consumer should continue polling when deserialization errors occur.
+The default function sends a message to the error channel (if provided) with possible acknowledgement for the failed message as it is described above.
+All these `StreamReceiver.StreamReceiverOptionsBuilder` are mutually exclusive with an externally provided `StreamReceiver.StreamReceiverOptions`.
 
 [[redis-lock-registry]]
 === Redis Lock Registry

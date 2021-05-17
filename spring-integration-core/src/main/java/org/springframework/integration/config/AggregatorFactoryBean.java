@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2020 the original author or authors.
+ * Copyright 2015-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,14 @@
 
 package org.springframework.integration.config;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 import org.aopalliance.aop.Advice;
+import org.jetbrains.annotations.Nullable;
 
 import org.springframework.expression.Expression;
 import org.springframework.integration.aggregator.AbstractAggregatingMessageGroupProcessor;
@@ -34,6 +37,7 @@ import org.springframework.integration.store.MessageGroup;
 import org.springframework.integration.store.MessageGroupStore;
 import org.springframework.integration.support.locks.LockRegistry;
 import org.springframework.integration.util.JavaUtils;
+import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.MessageHandler;
 import org.springframework.scheduling.TaskScheduler;
@@ -61,13 +65,6 @@ public class AggregatorFactoryBean extends AbstractSimpleMessageHandlerFactoryBe
 	private Long sendTimeout;
 
 	private String outputChannelName;
-
-	@SuppressWarnings("deprecation")
-	private org.springframework.integration.support.management.AbstractMessageHandlerMetrics metrics;
-
-	private Boolean statsEnabled;
-
-	private Boolean countsEnabled;
 
 	private LockRegistry lockRegistry;
 
@@ -97,7 +94,13 @@ public class AggregatorFactoryBean extends AbstractSimpleMessageHandlerFactoryBe
 
 	private Boolean releaseLockBeforeSend;
 
+	private Long expireTimeout;
+
+	private Long expireDuration;
+
 	private Function<MessageGroup, Map<String, Object>> headersFunction;
+
+	private BiFunction<Message<?>, String, String> groupConditionSupplier;
 
 	public void setProcessorBean(Object processorBean) {
 		this.processorBean = processorBean;
@@ -118,25 +121,6 @@ public class AggregatorFactoryBean extends AbstractSimpleMessageHandlerFactoryBe
 	@Override
 	public void setOutputChannelName(String outputChannelName) {
 		this.outputChannelName = outputChannelName;
-	}
-
-	/**
-	 * Deprecated.
-	 * @param metrics the metrics.
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@SuppressWarnings("deprecation")
-	public void setMetrics(org.springframework.integration.support.management.AbstractMessageHandlerMetrics metrics) {
-		this.metrics = metrics;
-	}
-
-	public void setStatsEnabled(Boolean statsEnabled) {
-		this.statsEnabled = statsEnabled;
-	}
-
-	public void setCountsEnabled(Boolean countsEnabled) {
-		this.countsEnabled = countsEnabled;
 	}
 
 	public void setLockRegistry(LockRegistry lockRegistry) {
@@ -199,7 +183,18 @@ public class AggregatorFactoryBean extends AbstractSimpleMessageHandlerFactoryBe
 		this.headersFunction = headersFunction;
 	}
 
-	@SuppressWarnings("deprecation")
+	public void setExpireTimeout(Long expireTimeout) {
+		this.expireTimeout = expireTimeout;
+	}
+
+	public void setExpireDurationMillis(Long expireDuration) {
+		this.expireDuration = expireDuration;
+	}
+
+	public void setGroupConditionSupplier(BiFunction<Message<?>, String, String> groupConditionSupplier) {
+		this.groupConditionSupplier = groupConditionSupplier;
+	}
+
 	@Override
 	protected AggregatingMessageHandler createHandler() {
 		MessageGroupProcessor outputProcessor;
@@ -225,17 +220,15 @@ public class AggregatorFactoryBean extends AbstractSimpleMessageHandlerFactoryBe
 		}
 
 		AggregatingMessageHandler aggregator = new AggregatingMessageHandler(outputProcessor);
+
 		JavaUtils.INSTANCE
 				.acceptIfNotNull(this.expireGroupsUponCompletion, aggregator::setExpireGroupsUponCompletion)
 				.acceptIfNotNull(this.sendTimeout, aggregator::setSendTimeout)
 				.acceptIfNotNull(this.outputChannelName, aggregator::setOutputChannelName)
-				.acceptIfNotNull(this.metrics, aggregator::configureMetrics)
-				.acceptIfNotNull(this.statsEnabled, aggregator::setStatsEnabled)
-				.acceptIfNotNull(this.countsEnabled, aggregator::setCountsEnabled)
 				.acceptIfNotNull(this.lockRegistry, aggregator::setLockRegistry)
 				.acceptIfNotNull(this.messageStore, aggregator::setMessageStore)
-				.acceptIfNotNull(this.correlationStrategy, aggregator::setCorrelationStrategy)
-				.acceptIfNotNull(this.releaseStrategy, aggregator::setReleaseStrategy)
+				.acceptIfNotNull(obtainCorrelationStrategy(), aggregator::setCorrelationStrategy)
+				.acceptIfNotNull(obtainReleaseStrategy(), aggregator::setReleaseStrategy)
 				.acceptIfNotNull(this.groupTimeoutExpression, aggregator::setGroupTimeoutExpression)
 				.acceptIfNotNull(this.forceReleaseAdviceChain, aggregator::setForceReleaseAdviceChain)
 				.acceptIfNotNull(this.taskScheduler, aggregator::setTaskScheduler)
@@ -245,9 +238,35 @@ public class AggregatorFactoryBean extends AbstractSimpleMessageHandlerFactoryBe
 				.acceptIfNotNull(this.minimumTimeoutForEmptyGroups, aggregator::setMinimumTimeoutForEmptyGroups)
 				.acceptIfNotNull(this.expireGroupsUponTimeout, aggregator::setExpireGroupsUponTimeout)
 				.acceptIfNotNull(this.popSequence, aggregator::setPopSequence)
-				.acceptIfNotNull(this.releaseLockBeforeSend, aggregator::setReleaseLockBeforeSend);
+				.acceptIfNotNull(this.releaseLockBeforeSend, aggregator::setReleaseLockBeforeSend)
+				.acceptIfNotNull(this.expireDuration,
+						(duration) -> aggregator.setExpireDuration(Duration.ofMillis(duration)))
+				.acceptIfNotNull(this.groupConditionSupplier, aggregator::setGroupConditionSupplier)
+				.acceptIfNotNull(this.expireTimeout, aggregator::setExpireTimeout);
 
 		return aggregator;
+	}
+
+	@Nullable
+	private CorrelationStrategy obtainCorrelationStrategy() {
+		if (this.correlationStrategy == null && this.processorBean != null) {
+			CorrelationStrategyFactoryBean correlationStrategyFactoryBean = new CorrelationStrategyFactoryBean();
+			correlationStrategyFactoryBean.setTarget(this.processorBean);
+			correlationStrategyFactoryBean.afterPropertiesSet();
+			return correlationStrategyFactoryBean.getObject();
+		}
+		return this.correlationStrategy;
+	}
+
+	@Nullable
+	private ReleaseStrategy obtainReleaseStrategy() {
+		if (this.releaseStrategy == null && this.processorBean != null) {
+			ReleaseStrategyFactoryBean releaseStrategyFactoryBean = new ReleaseStrategyFactoryBean();
+			releaseStrategyFactoryBean.setTarget(this.processorBean);
+			releaseStrategyFactoryBean.afterPropertiesSet();
+			return releaseStrategyFactoryBean.getObject();
+		}
+		return this.releaseStrategy;
 	}
 
 	@Override

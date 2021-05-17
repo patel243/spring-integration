@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,7 @@ import org.springframework.integration.handler.AbstractReplyProducingMessageHand
 import org.springframework.integration.handler.ExpressionEvaluatingMessageProcessor;
 import org.springframework.integration.support.MutableMessage;
 import org.springframework.integration.support.PartialSuccessException;
+import org.springframework.integration.support.utils.IntegrationUtils;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageHandlingException;
@@ -97,6 +98,8 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 	 */
 	private FileListFilter<F> filter;
 
+	private boolean filterAfterEnhancement;
+
 	/**
 	 * A {@link FileListFilter} that runs against the <em>local</em> file system view when
 	 * using MPUT.
@@ -121,6 +124,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 			MessageSessionCallback<F, ?> messageSessionCallback) {
 
 		this(new RemoteFileTemplate<>(sessionFactory), messageSessionCallback);
+		remoteFileTemplateExplicitlySet(false);
 	}
 
 	/**
@@ -165,6 +169,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 			@Nullable String expression) {
 
 		this(new RemoteFileTemplate<>(sessionFactory), command, expression);
+		remoteFileTemplateExplicitlySet(false);
 	}
 
 	/**
@@ -185,21 +190,23 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 	 * 'get' etc), and an expression to determine the filename.
 	 * @param remoteFileTemplate the remote file template.
 	 * @param command the command.
-	 * @param expression the filename expression.
+	 * @param expressionArg the filename expression.
 	 */
 	public AbstractRemoteFileOutboundGateway(RemoteFileTemplate<F> remoteFileTemplate, Command command,
-			@Nullable String expression) {
+			@Nullable String expressionArg) {
 
 		Assert.notNull(remoteFileTemplate, "'remoteFileTemplate' cannot be null");
 		this.remoteFileTemplate = remoteFileTemplate;
 		this.command = command;
-		if (expression == null) {
-			Assert.state(Command.LS.equals(this.command)
-							|| Command.NLST.equals(this.command)
-							|| Command.PUT.equals(this.command)
-							|| Command.MPUT.equals(this.command),
-					"Only LS, NLST, PUT and MPUT commands can rely on the working directory.\n" +
-							"All other commands must be supplied with the filename expression");
+		String expression = expressionArg;
+		boolean expressionNeeded = !(Command.LS.equals(this.command)
+				|| Command.NLST.equals(this.command)
+				|| Command.PUT.equals(this.command)
+				|| Command.MPUT.equals(this.command));
+		if (!StringUtils.hasText(expression) && expressionNeeded) {
+			expression = "payload";
+		}
+		if (!StringUtils.hasText(expression)) {
 			this.fileNameProcessor = null;
 		}
 		else {
@@ -398,6 +405,15 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 	 */
 	public void setFilter(FileListFilter<F> filter) {
 		this.filter = filter;
+		this.filterAfterEnhancement = filter != null
+				&& filter.isForRecursion()
+				&& filter.supportsSingleFileFiltering()
+				&& this.options.contains(Option.RECURSIVE);
+		if (filter != null && !filter.isForRecursion()) {
+			this.logger.warn("When using recursion, you will normally want to set the filter's "
+					+ "'forRecursion' property; otherwise files added deep into the "
+					+ "directory tree may not be detected");
+		}
 	}
 
 	/**
@@ -511,11 +527,14 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 
 		if (Command.MGET.equals(this.command)) {
 			Assert.isTrue(!(this.options.contains(Option.SUBDIRS)),
-					"Cannot use " + Option.SUBDIRS.toString() + " when using 'mget' use " +
+					() -> "Cannot use " + Option.SUBDIRS.toString() + " when using 'mget' use " +
 							Option.RECURSIVE.toString() + " to obtain files in subdirectories");
 		}
 
 		populateBeanFactoryIntoComponentsIfAny();
+		if (!this.remoteFileTemplateExplicitlySet) {
+			this.remoteFileTemplate.afterPropertiesSet();
+		}
 	}
 
 	private void populateBeanFactoryIntoComponentsIfAny() {
@@ -537,9 +556,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 		if (!localDirectory.exists()) {
 			try {
 				if (this.autoCreateLocalDirectory) {
-					if (logger.isDebugEnabled()) {
-						logger.debug("The '" + localDirectory + "' directory doesn't exist; Will create.");
-					}
+					logger.debug(() -> "The '" + localDirectory + "' directory doesn't exist; Will create.");
 					if (!localDirectory.mkdirs()) {
 						throw new IOException("Failed to make local directory: " + localDirectory);
 					}
@@ -581,38 +598,36 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 	}
 
 	private Object doLs(Message<?> requestMessage) {
-		String dir = this.fileNameProcessor != null
-				? this.fileNameProcessor.processMessage(requestMessage)
-				: null;
-		if (dir != null && !dir.endsWith(this.remoteFileTemplate.getRemoteFileSeparator())) {
-			dir += this.remoteFileTemplate.getRemoteFileSeparator();
-		}
-		final String fullDir = dir;
+		String dir = obtainRemoteDir(requestMessage);
 		return this.remoteFileTemplate.execute(session -> {
-			List<?> payload = ls(requestMessage, session, fullDir);
+			List<?> payload = ls(requestMessage, session, dir);
 			return getMessageBuilderFactory()
 					.withPayload(payload)
-					.setHeader(FileHeaders.REMOTE_DIRECTORY, fullDir)
+					.setHeader(FileHeaders.REMOTE_DIRECTORY, dir)
 					.setHeader(FileHeaders.REMOTE_HOST_PORT, session.getHostPort());
 		});
 
 	}
 
 	private Object doNlst(Message<?> requestMessage) {
+		String dir = obtainRemoteDir(requestMessage);
+		return this.remoteFileTemplate.execute(session -> {
+			List<?> payload = nlst(requestMessage, session, dir);
+			return getMessageBuilderFactory()
+					.withPayload(payload)
+					.setHeader(FileHeaders.REMOTE_DIRECTORY, dir)
+					.setHeader(FileHeaders.REMOTE_HOST_PORT, session.getHostPort());
+		});
+	}
+
+	private String obtainRemoteDir(Message<?> requestMessage) {
 		String dir = this.fileNameProcessor != null
 				? this.fileNameProcessor.processMessage(requestMessage)
 				: null;
 		if (dir != null && !dir.endsWith(this.remoteFileTemplate.getRemoteFileSeparator())) {
 			dir += this.remoteFileTemplate.getRemoteFileSeparator();
 		}
-		final String fullDir = dir;
-		return this.remoteFileTemplate.execute(session -> {
-			List<?> payload = nlst(requestMessage, session, fullDir);
-			return getMessageBuilderFactory()
-					.withPayload(payload)
-					.setHeader(FileHeaders.REMOTE_DIRECTORY, fullDir)
-					.setHeader(FileHeaders.REMOTE_HOST_PORT, session.getHostPort());
-		});
+		return dir;
 	}
 
 	/**
@@ -639,7 +654,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 		String remoteFilePath = obtainRemoteFilePath(requestMessage);
 		String remoteFilename = getRemoteFilename(remoteFilePath);
 		String remoteDir = getRemoteDirectory(remoteFilePath, remoteFilename);
-		Session<F> session = null;
+		Session<F> session;
 		Object payload;
 		if (this.options.contains(Option.STREAM)) {
 			session = this.remoteFileTemplate.getSessionFactory().getSession();
@@ -760,7 +775,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 		if (lastSeparator > 0) {
 			String remoteFileDirectory = remoteFileNewPath.substring(0, lastSeparator + 1);
 			RemoteFileUtils.makeDirectories(remoteFileDirectory, session,
-					this.remoteFileTemplate.getRemoteFileSeparator(), this.logger);
+					this.remoteFileTemplate.getRemoteFileSeparator(), this.logger.getLog());
 		}
 		session.rename(remoteFilePath, remoteFileNewPath);
 		return true;
@@ -833,8 +848,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 		}
 		else {
 			File localDir = file;
-			return this.remoteFileTemplate.invoke(t ->
-					mPut(requestMessage, t.getSession(), localDir));
+			return this.remoteFileTemplate.invoke(t -> mPut(requestMessage, t.getSession(), localDir));
 		}
 	}
 
@@ -862,8 +876,9 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 					if (path != null) {
 						replies.add(path);
 					}
-					else if (logger.isDebugEnabled()) {
-						logger.debug("File " + filteredFile.getAbsolutePath() + " removed before transfer; ignoring");
+					else {
+						logger.debug(() ->
+								"File " + filteredFile.getAbsolutePath() + " removed before transfer; ignoring");
 					}
 				}
 				else if (this.options.contains(Option.RECURSIVE)) {
@@ -940,12 +955,19 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 		List<F> lsFiles = new ArrayList<>();
 		String remoteDirectory = buildRemotePath(directory, subDirectory);
 
-		F[] files = session.list(remoteDirectory);
-		boolean recursion = this.options.contains(Option.RECURSIVE);
+		F[] list = session.list(remoteDirectory);
+		List<F> files;
+		if (!this.filterAfterEnhancement) {
+			files = filterFiles(list);
+		}
+		else {
+			files = Arrays.asList(list);
+		}
 		if (!ObjectUtils.isEmpty(files)) {
-			for (F file : filterFiles(files)) {
+			for (F file : files) {
 				if (file != null) {
-					processFile(session, directory, subDirectory, lsFiles, recursion, file);
+					processFile(session, directory, subDirectory, lsFiles, this.options.contains(Option.RECURSIVE),
+							file);
 				}
 			}
 		}
@@ -958,7 +980,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 			remotePath = (parent + child);
 		}
 		else if (StringUtils.hasText(child)) {
-			remotePath = "." + this.remoteFileTemplate.getRemoteFileSeparator() + child;
+			remotePath = '.' + this.remoteFileTemplate.getRemoteFileSeparator() + child;
 		}
 		return remotePath;
 	}
@@ -967,22 +989,46 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 		return (this.filter != null) ? this.filter.filterFiles(files) : Arrays.asList(files);
 	}
 
-	private void processFile(Session<F> session, String directory, String subDirectory, List<F> lsFiles,
-			boolean recursion, F file) throws IOException {
+	protected final F filterFile(F file) {
+		if (this.filter.accept(file)) {
+			return file;
+		}
+		else {
+			return null;
+		}
+	}
 
-		if (this.options.contains(Option.SUBDIRS) || !isDirectory(file)) {
-			if (recursion && StringUtils.hasText(subDirectory)) {
-				lsFiles.add(enhanceNameWithSubDirectory(file, subDirectory));
-			}
-			else {
-				lsFiles.add(file);
-			}
+	private void processFile(Session<F> session, String directory, String subDirectory, // NOSONAR - complexity
+			List<F> lsFiles, boolean recursion, F file) throws IOException {
+
+		F fileToAdd = file;
+		if (recursion && StringUtils.hasText(subDirectory)) {
+			fileToAdd = enhanceNameWithSubDirectory(file, subDirectory);
 		}
-		String fileName = getFilename(file);
-		if (recursion && isDirectory(file) && !(".".equals(fileName)) && !("..".equals(fileName))) {
+		if (this.filterAfterEnhancement && !this.filter.accept(fileToAdd)) {
+			return;
+		}
+		String fileName = getFilename(fileToAdd);
+		final boolean isDirectory = isDirectory(file);
+		boolean isDots = hasDots(fileName);
+		if ((this.options.contains(Option.SUBDIRS) || !isDirectory)
+				&& (!isDots || this.options.contains(Option.ALL))) {
+
+			lsFiles.add(fileToAdd);
+		}
+
+		if (recursion && isDirectory && !isDots) {
 			lsFiles.addAll(listFilesInRemoteDir(session, directory,
-					subDirectory + fileName + this.remoteFileTemplate.getRemoteFileSeparator()));
+					fileName + this.remoteFileTemplate.getRemoteFileSeparator()));
 		}
+	}
+
+	private boolean hasDots(String fileName) {
+		String fileSeparator = this.remoteFileTemplate.getRemoteFileSeparator();
+		return ".".equals(fileName)
+				|| "..".equals(fileName)
+				|| fileName.endsWith(fileSeparator + ".")
+				|| fileName.endsWith(fileSeparator + "..");
 	}
 
 	protected final List<File> filterMputFiles(File[] files) {
@@ -1026,7 +1072,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 			}
 			fileInfo = files[0];
 		}
-		File localFile =
+		final File localFile =
 				new File(generateLocalDirectory(message, remoteDir), generateLocalFileName(message, remoteFilename));
 		FileExistsMode existsMode = this.fileExistsMode;
 		boolean appending = FileExistsMode.APPEND.equals(existsMode);
@@ -1044,27 +1090,23 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 			else {
 				outputStream = new BufferedOutputStream(new FileOutputStream(tempFile));
 			}
-			if (replacing && !localFile.delete() && this.logger.isWarnEnabled()) {
-				this.logger.warn("Failed to delete " + localFile);
+			if (replacing && !localFile.delete()) {
+				this.logger.warn(() -> "Failed to delete " + localFile);
 			}
 			try {
 				session.read(remoteFilePath, outputStream);
 			}
-			catch (Exception e) {
+			catch (Exception ex) {
 				/* Some operation systems acquire exclusive file-lock during file processing
 				   and the file can't be deleted without closing streams before.
 				*/
 				outputStream.close();
-				if (!tempFile.delete() && this.logger.isWarnEnabled()) {
-					this.logger.warn("Failed to delete tempFile " + tempFile);
+				if (!tempFile.delete()) {
+					this.logger.warn(() -> "Failed to delete tempFile " + tempFile);
 				}
 
-				if (e instanceof RuntimeException) {
-					throw (RuntimeException) e;
-				}
-				else {
-					throw new MessagingException("Failure occurred while copying from remote to local directory", e);
-				}
+				throw IntegrationUtils.wrapInHandlingExceptionIfNecessary(message,
+						() -> "Failure occurred while copying from remote to local directory", ex);
 			}
 			finally {
 				try {
@@ -1079,25 +1121,24 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 			}
 			if ((this.options.contains(Option.PRESERVE_TIMESTAMP)
 					|| FileExistsMode.REPLACE_IF_MODIFIED.equals(existsMode))
-					&& (!localFile.setLastModified(getModified(fileInfo)) && this.logger.isWarnEnabled())) {
-				logger.warn("Failed to set lastModified on " + localFile);
+					&& (!localFile.setLastModified(getModified(fileInfo)))) {
+
+				logger.warn(() -> "Failed to set lastModified on " + localFile);
 			}
 			if (this.options.contains(Option.DELETE)) {
 				boolean result = session.remove(remoteFilePath);
 				if (!result) {
 					logger.error("Failed to delete: " + remoteFilePath);
 				}
-				else if (logger.isDebugEnabled()) {
-					logger.debug(remoteFilePath + " deleted");
+				else {
+					logger.debug(() -> remoteFilePath + " deleted");
 				}
 			}
 		}
 		else if (FileExistsMode.REPLACE_IF_MODIFIED.equals(existsMode)) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Local file '" + localFile + "' has the same modified timestamp, ignored");
-			}
+			logger.debug(() -> "Local file '" + localFile + "' has the same modified timestamp, ignored");
 			if (this.command.equals(Command.MGET)) {
-				localFile = null;
+				return null;
 			}
 		}
 		else if (!FileExistsMode.IGNORE.equals(existsMode)) {
@@ -1105,11 +1146,9 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 					"Error handling message in the [" + this + "]. Local file " + localFile + " already exists");
 		}
 		else {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Existing file skipped: " + localFile);
-			}
+			logger.debug(() -> "Existing file skipped: " + localFile);
 			if (this.command.equals(Command.MGET)) {
-				localFile = null;
+				return null;
 			}
 		}
 		return localFile;
@@ -1119,7 +1158,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 			String remoteFilename) throws IOException {
 
 		if (this.options.contains(Option.RECURSIVE)) {
-			if (logger.isWarnEnabled() && !("*".equals(remoteFilename))) {
+			if (!("*".equals(remoteFilename))) {
 				logger.warn("File name pattern must be '*' when using recursion");
 			}
 			this.options.remove(Option.NAME_ONLY);
@@ -1253,7 +1292,7 @@ public abstract class AbstractRemoteFileOutboundGateway<F> extends AbstractReply
 		File localDir = ExpressionUtils.expressionToFile(this.localDirectoryExpression, evaluationContext, message,
 				"Local Directory");
 		if (!localDir.exists()) {
-			Assert.isTrue(localDir.mkdirs(), "Failed to make local directory: " + localDir);
+			Assert.isTrue(localDir.mkdirs(), () -> "Failed to make local directory: " + localDir);
 		}
 		return localDir;
 	}

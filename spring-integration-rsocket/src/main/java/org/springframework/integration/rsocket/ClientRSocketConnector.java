@@ -29,7 +29,6 @@ import org.springframework.util.MimeType;
 import io.rsocket.transport.ClientTransport;
 import io.rsocket.transport.netty.client.TcpClientTransport;
 import io.rsocket.transport.netty.client.WebsocketClientTransport;
-import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 
 /**
@@ -39,7 +38,7 @@ import reactor.core.publisher.Mono;
  *
  * @since 5.2
  *
- * @see io.rsocket.RSocketFactory.ClientRSocketFactory
+ * @see io.rsocket.core.RSocketConnector
  * @see RSocketRequester
  */
 public class ClientRSocketConnector extends AbstractRSocketConnector {
@@ -58,7 +57,7 @@ public class ClientRSocketConnector extends AbstractRSocketConnector {
 
 	private boolean autoConnect;
 
-	private Mono<RSocketRequester> rsocketRequesterMono;
+	private RSocketRequester rsocketRequester;
 
 	/**
 	 * Instantiate a connector based on the {@link TcpClientTransport}.
@@ -82,33 +81,12 @@ public class ClientRSocketConnector extends AbstractRSocketConnector {
 	/**
 	 * Instantiate a connector based on the provided {@link ClientTransport}.
 	 * @param clientTransport the {@link ClientTransport} to use.
-	 * @see RSocketRequester.Builder#connect(ClientTransport)
+	 * @see RSocketRequester.Builder#transport(ClientTransport)
 	 */
 	public ClientRSocketConnector(ClientTransport clientTransport) {
 		super(new IntegrationRSocketMessageHandler());
 		Assert.notNull(clientTransport, "'clientTransport' must not be null");
 		this.clientTransport = clientTransport;
-	}
-
-	/**
-	 * Callback to configure the {@code ClientRSocketFactory} directly.
-	 * Note: this class adds extra {@link org.springframework.messaging.rsocket.ClientRSocketFactoryConfigurer} to the
-	 * target {@link RSocketRequester} to populate a reference to an internal
-	 * {@link IntegrationRSocketMessageHandler#responder()}.
-	 * This overrides possible external
-	 * {@link io.rsocket.RSocketFactory.ClientRSocketFactory#acceptor(io.rsocket.SocketAcceptor)}
-	 * @param factoryConfigurer the {@link org.springframework.messaging.rsocket.ClientRSocketFactoryConfigurer} to
-	 *  configure the {@link io.rsocket.RSocketFactory.ClientRSocketFactory}.
-	 * @see RSocketRequester.Builder#rsocketFactory(org.springframework.messaging.rsocket.ClientRSocketFactoryConfigurer)
-	 * @deprecated since 5.2.6 in favor of {@link #setConnectorConfigurer(RSocketConnectorConfigurer)}
-	 */
-	@Deprecated
-	public void setFactoryConfigurer(
-			org.springframework.messaging.rsocket.ClientRSocketFactoryConfigurer factoryConfigurer) {
-
-		Assert.notNull(factoryConfigurer, "'factoryConfigurer' must not be null");
-		setConnectorConfigurer((connector) ->
-				factoryConfigurer.configure(new io.rsocket.RSocketFactory.ClientRSocketFactory(connector)));
 	}
 
 	/**
@@ -175,19 +153,17 @@ public class ClientRSocketConnector extends AbstractRSocketConnector {
 	public void afterPropertiesSet() {
 		super.afterPropertiesSet();
 
-		this.rsocketRequesterMono =
-				RSocketRequester.builder()
-						.dataMimeType(getDataMimeType())
-						.metadataMimeType(getMetadataMimeType())
-						.rsocketStrategies(getRSocketStrategies())
-						.setupData(this.setupData)
-						.setupRoute(this.setupRoute, this.setupRouteVars)
-						.rsocketConnector(this.connectorConfigurer)
-						.rsocketConnector((connector) ->
-								connector.acceptor(this.rSocketMessageHandler.responder()))
-						.apply((builder) -> this.setupMetadata.forEach(builder::setupMetadata))
-						.connect(this.clientTransport)
-						.cache();
+		this.rsocketRequester = RSocketRequester.builder()
+				.dataMimeType(getDataMimeType())
+				.metadataMimeType(getMetadataMimeType())
+				.rsocketStrategies(getRSocketStrategies())
+				.setupData(this.setupData)
+				.setupRoute(this.setupRoute, this.setupRouteVars)
+				.rsocketConnector(this.connectorConfigurer)
+				.rsocketConnector((connector) ->
+						connector.acceptor(this.rSocketMessageHandler.responder()))
+				.apply((builder) -> this.setupMetadata.forEach(builder::setupMetadata))
+				.transport(this.clientTransport);
 	}
 
 	@Override
@@ -204,21 +180,33 @@ public class ClientRSocketConnector extends AbstractRSocketConnector {
 
 	@Override
 	public void destroy() {
-		this.rsocketRequesterMono
-				.map(RSocketRequester::rsocket)
-				.doOnNext(Disposable::dispose)
-				.subscribe();
+		this.rsocketRequester.rsocketClient().dispose();
 	}
 
 	/**
 	 * Perform subscription into the RSocket server for incoming requests.
 	 */
 	public void connect() {
-		this.rsocketRequesterMono.subscribe();
+		this.rsocketRequester.rsocketClient().source().subscribe();
 	}
 
+	/**
+	 * Return the {@link Mono} for the {@link RSocketRequester}.
+	 * @return the {@link Mono} for the {@link RSocketRequester}.
+	 * @deprecated since 5.4 in favor of {@link #getRequester()}
+	 */
+	@Deprecated
 	public Mono<RSocketRequester> getRSocketRequester() {
-		return this.rsocketRequesterMono;
+		return Mono.just(getRequester());
+	}
+
+	/**
+	 * Return the {@link RSocketRequester} this connector is built on.
+	 * @return the {@link RSocketRequester} this connector is built on.
+	 * @since 5.4
+	 */
+	public RSocketRequester getRequester() {
+		return this.rsocketRequester;
 	}
 
 }

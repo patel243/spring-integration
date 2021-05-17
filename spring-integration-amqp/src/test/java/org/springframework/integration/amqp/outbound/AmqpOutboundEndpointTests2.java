@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 the original author or authors.
+ * Copyright 2019-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.Collections;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 
@@ -29,20 +30,22 @@ import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.core.QueueBuilder.Overflow;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.junit.RabbitAvailable;
 import org.springframework.amqp.rabbit.junit.RabbitAvailableCondition;
+import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.integration.amqp.dsl.Amqp;
 import org.springframework.integration.config.EnableIntegration;
 import org.springframework.integration.dsl.IntegrationFlow;
+import org.springframework.integration.support.MessageBuilder;
 import org.springframework.messaging.MessageHandlingException;
 import org.springframework.messaging.support.GenericMessage;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.junit.jupiter.DisabledIf;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 /**
@@ -75,8 +78,17 @@ public class AmqpOutboundEndpointTests2 {
 	}
 
 	@Test
-	@DisabledIf("#{systemEnvironment['TRAVIS'] ?: false}")
-		// needs RabbitMQ 3.7
+	void testReturnConfirmNoChannels(@Autowired IntegrationFlow flow2) throws Exception {
+		CorrelationData corr = new CorrelationData("foo");
+		flow2.getInputChannel().send(MessageBuilder.withPayload("test")
+				.setHeader("rk", "junkjunk")
+				.setHeader(AmqpHeaders.PUBLISH_CONFIRM_CORRELATION, corr)
+				.build());
+		assertThat(corr.getFuture().get(10, TimeUnit.SECONDS).isAck()).isTrue();
+		assertThat(corr.getReturned()).isNotNull();
+	}
+
+	@Test
 	void testWithReject(@Autowired IntegrationFlow flow, @Autowired RabbitAdmin admin,
 			@Autowired RabbitTemplate template) {
 
@@ -104,6 +116,13 @@ public class AmqpOutboundEndpointTests2 {
 					.routingKeyFunction(msg -> msg.getHeaders().get("rk", String.class))
 					.confirmCorrelationFunction(msg -> msg)
 					.waitForConfirm(true));
+		}
+
+		@Bean
+		public IntegrationFlow flow2(RabbitTemplate template) {
+			return f -> f.handle(Amqp.outboundAdapter(template)
+					.exchangeName("")
+					.routingKeyFunction(msg -> msg.getHeaders().get("rk", String.class)));
 		}
 
 		@Bean

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package org.springframework.integration.gateway;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.UndeclaredThrowableException;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -32,6 +33,7 @@ import java.util.concurrent.Future;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
@@ -54,17 +56,18 @@ import org.springframework.core.task.support.TaskExecutorAdapter;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.expression.common.LiteralExpression;
-import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
 import org.springframework.integration.IntegrationPatternType;
 import org.springframework.integration.annotation.Gateway;
 import org.springframework.integration.annotation.GatewayHeader;
+import org.springframework.integration.context.IntegrationContextUtils;
 import org.springframework.integration.endpoint.AbstractEndpoint;
 import org.springframework.integration.expression.ExpressionUtils;
 import org.springframework.integration.expression.ValueExpression;
-import org.springframework.integration.support.DefaultMessageBuilderFactory;
 import org.springframework.integration.support.channel.ChannelResolverUtils;
+import org.springframework.integration.support.management.IntegrationManagement;
 import org.springframework.integration.support.management.TrackableComponent;
+import org.springframework.integration.support.management.metrics.MetricsCaptor;
 import org.springframework.integration.util.JavaUtils;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
@@ -101,9 +104,8 @@ import reactor.core.publisher.Mono;
  * @author Artem Bilan
  */
 public class GatewayProxyFactoryBean extends AbstractEndpoint
-		implements TrackableComponent, FactoryBean<Object>, MethodInterceptor, BeanClassLoaderAware {
-
-	private static final SpelExpressionParser PARSER = new SpelExpressionParser();
+		implements TrackableComponent, FactoryBean<Object>, MethodInterceptor, BeanClassLoaderAware,
+		IntegrationManagement {
 
 	private final Object initializationMonitor = new Object();
 
@@ -156,6 +158,8 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 	private boolean proxyDefaultMethods;
 
 	private EvaluationContext evaluationContext = new StandardEvaluationContext();
+
+	private MetricsCaptor metricsCaptor;
 
 	/**
 	 * Create a Factory whose service interface type can be configured by setter injection.
@@ -440,6 +444,12 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 	}
 
 	@Override
+	public void registerMetricsCaptor(MetricsCaptor metricsCaptorToRegister) {
+		this.metricsCaptor = metricsCaptorToRegister;
+		this.gatewayMap.values().forEach(gw -> gw.registerMetricsCaptor(metricsCaptorToRegister));
+	}
+
+	@Override
 	protected void onInit() {
 		synchronized (this.initializationMonitor) {
 			if (this.initialized) {
@@ -500,10 +510,13 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 	@Override
 	@Nullable
 	public Object invoke(final MethodInvocation invocation) throws Throwable { // NOSONAR
-		Class<?> returnType = invocation.getMethod().getReturnType();
+		final Class<?> returnType;
 		MethodInvocationGateway gateway = this.gatewayMap.get(invocation.getMethod());
 		if (gateway != null) {
 			returnType = gateway.returnType;
+		}
+		else {
+			returnType = invocation.getMethod().getReturnType();
 		}
 		if (this.asyncExecutor != null && !Object.class.equals(returnType)) {
 			Invoker invoker = new Invoker(invocation);
@@ -516,8 +529,8 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 			else if (CompletableFuture.class.equals(returnType)) { // exact
 				return CompletableFuture.supplyAsync(invoker, this.asyncExecutor);
 			}
-			else if (Future.class.isAssignableFrom(returnType) && logger.isDebugEnabled()) {
-				logger.debug("AsyncTaskExecutor submit*() return types are incompatible with the method return " +
+			else if (Future.class.isAssignableFrom(returnType)) {
+				logger.debug(() -> "AsyncTaskExecutor submit*() return types are incompatible with the method return " +
 						"type; running on calling thread; the downstream flow must return the required Future: "
 						+ returnType.getSimpleName());
 			}
@@ -718,7 +731,7 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 			 * no longer work as expected; they will need to use, say, -1 instead.
 			 */
 			if (payloadExpression == null && StringUtils.hasText(gatewayAnnotation.payloadExpression())) {
-				payloadExpression = PARSER.parseExpression(gatewayAnnotation.payloadExpression());
+				payloadExpression = EXPRESSION_PARSER.parseExpression(gatewayAnnotation.payloadExpression());
 			}
 		}
 		else if (methodMetadata != null && methodMetadata.getPayloadExpression() != null) {
@@ -856,9 +869,16 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 
 		timeouts(requestTimeout, replyTimeout, messageMapper, gateway);
 
-		gateway.setBeanName(getComponentName());
+		String gatewayMethodBeanName =
+				getComponentName() + '#' + method.getName() +
+				'(' + Arrays.stream(method.getParameterTypes())
+						.map(Class::getSimpleName)
+						.collect(Collectors.joining(", ")) + ')';
+
+		gateway.setBeanName(gatewayMethodBeanName);
 		gateway.setBeanFactory(getBeanFactory());
 		gateway.setShouldTrack(this.shouldTrack);
+		gateway.registerMetricsCaptor(this.metricsCaptor);
 		gateway.afterPropertiesSet();
 
 		return gateway;
@@ -875,35 +895,46 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 				headers, this.argsMapper, getMessageBuilderFactory());
 	}
 
-	@Nullable
+	@Nullable // NOSONAR - complexitty
 	private Map<String, Object> headers(Method method, Map<String, Expression> headerExpressions) {
 		Map<String, Object> headers = null;
 		// We don't want to eagerly resolve the error channel here
 		Object errorChannelForVoidReturn = this.errorChannel == null ? this.errorChannelName : this.errorChannel;
-		if (errorChannelForVoidReturn != null && method.getReturnType().equals(void.class)) {
+		boolean isVoidReturnType = method.getReturnType().equals(void.class);
+		if (errorChannelForVoidReturn != null && isVoidReturnType) {
 			headers = new HashMap<>();
 			headers.put(MessageHeaders.ERROR_CHANNEL, errorChannelForVoidReturn);
 		}
 
-		if (getMessageBuilderFactory() instanceof DefaultMessageBuilderFactory) {
-			Set<String> headerNames = new HashSet<>(headerExpressions.keySet());
+		if (isVoidReturnType &&
+				(!headerExpressions.containsKey(MessageHeaders.REPLY_CHANNEL) ||
+						(this.globalMethodMetadata != null &&
+								!this.globalMethodMetadata.getHeaderExpressions()
+										.containsKey(MessageHeaders.REPLY_CHANNEL)))) {
 
-			if (this.globalMethodMetadata != null) {
-				headerNames.addAll(this.globalMethodMetadata.getHeaderExpressions().keySet());
+			if (headers == null) {
+				headers = new HashMap<>();
 			}
-
-			List<MethodParameter> methodParameters = GatewayMethodInboundMessageMapper.getMethodParameterList(method);
-
-			for (MethodParameter methodParameter : methodParameters) {
-				Header header = methodParameter.getParameterAnnotation(Header.class);
-				if (header != null) {
-					String headerName = GatewayMethodInboundMessageMapper.determineHeaderName(header, methodParameter);
-					headerNames.add(headerName);
-				}
-			}
-
-			validateHeaders(headerNames);
+			headers.put(MessageHeaders.REPLY_CHANNEL, IntegrationContextUtils.NULL_CHANNEL_BEAN_NAME);
 		}
+
+		Set<String> headerNames = new HashSet<>(headerExpressions.keySet());
+
+		if (this.globalMethodMetadata != null) {
+			headerNames.addAll(this.globalMethodMetadata.getHeaderExpressions().keySet());
+		}
+
+		List<MethodParameter> methodParameters = GatewayMethodInboundMessageMapper.getMethodParameterList(method);
+
+		for (MethodParameter methodParameter : methodParameters) {
+			Header header = methodParameter.getParameterAnnotation(Header.class);
+			if (header != null) {
+				String headerName = GatewayMethodInboundMessageMapper.determineHeaderName(header, methodParameter);
+				headerNames.add(headerName);
+			}
+		}
+
+		validateHeaders(headerNames);
 		return headers;
 	}
 
@@ -969,7 +1000,7 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 		}
 	}
 
-	private void setChannel(String channelName1, String channelName2, Consumer<String> channelNameMethod,
+	private void setChannel(@Nullable String channelName1, String channelName2, Consumer<String> channelNameMethod,
 			MessageChannel channel, Consumer<MessageChannel> channelMethod) {
 
 		if (StringUtils.hasText(channelName1)) {
@@ -987,16 +1018,12 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 
 	@Override // guarded by super#lifecycleLock
 	protected void doStart() {
-		for (MethodInvocationGateway gateway : this.gatewayMap.values()) {
-			gateway.start();
-		}
+		this.gatewayMap.values().forEach(MethodInvocationGateway::start);
 	}
 
 	@Override // guarded by super#lifecycleLock
 	protected void doStop() {
-		for (MethodInvocationGateway gateway : this.gatewayMap.values()) {
-			gateway.stop();
-		}
+		this.gatewayMap.values().forEach(MethodInvocationGateway::stop);
 	}
 
 	@SuppressWarnings("unchecked")
@@ -1014,6 +1041,12 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 		else {
 			return this.typeConverter.convertIfNecessary(source, expectedReturnType);
 		}
+	}
+
+	@Override
+	public void destroy() {
+		super.destroy();
+		this.gatewayMap.values().forEach(MethodInvocationGateway::destroy);
 	}
 
 	private static final class MethodInvocationGateway extends MessagingGatewaySupport {
@@ -1038,8 +1071,8 @@ public class GatewayProxyFactoryBean extends AbstractEndpoint
 		public IntegrationPatternType getIntegrationPatternType() {
 			return this.pollable ? IntegrationPatternType.outbound_channel_adapter
 					: this.isVoidReturn
-							? IntegrationPatternType.inbound_channel_adapter
-							: IntegrationPatternType.inbound_gateway;
+					? IntegrationPatternType.inbound_channel_adapter
+					: IntegrationPatternType.inbound_gateway;
 		}
 
 		@Nullable

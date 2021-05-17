@@ -1,5 +1,5 @@
 /*
- * Copyright 2001-2020 the original author or authors.
+ * Copyright 2001-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,10 +25,8 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.context.Lifecycle;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
-import org.springframework.expression.common.LiteralExpression;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
 import org.springframework.integration.MessageTimeoutException;
 import org.springframework.integration.expression.ExpressionUtils;
@@ -39,10 +37,11 @@ import org.springframework.integration.ip.tcp.connection.AbstractClientConnectio
 import org.springframework.integration.ip.tcp.connection.AbstractConnectionFactory;
 import org.springframework.integration.ip.tcp.connection.TcpConnection;
 import org.springframework.integration.ip.tcp.connection.TcpConnectionFailedCorrelationEvent;
-import org.springframework.integration.ip.tcp.connection.TcpConnectionSupport;
 import org.springframework.integration.ip.tcp.connection.TcpListener;
 import org.springframework.integration.ip.tcp.connection.TcpNioConnectionSupport;
 import org.springframework.integration.ip.tcp.connection.TcpSender;
+import org.springframework.integration.support.management.ManageableLifecycle;
+import org.springframework.integration.support.utils.IntegrationUtils;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.MessageHandlingException;
@@ -58,15 +57,16 @@ import org.springframework.util.concurrent.SettableListenableFuture;
  * (or times out). Asynchronous requests/responses over the same connection are not
  * supported - use a pair of outbound/inbound adapters for that use case.
  * <p>
- * {@link Lifecycle} methods delegate to the underlying {@link AbstractConnectionFactory}
+ * {@link org.springframework.context.Lifecycle} methods delegate to the underlying {@link AbstractConnectionFactory}.
  *
  *
  * @author Gary Russell
+ * @author Artem Bilan
  *
  * @since 2.0
  */
 public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
-		implements TcpSender, TcpListener, Lifecycle {
+		implements TcpSender, TcpListener, ManageableLifecycle {
 
 	private static final long DEFAULT_REMOTE_TIMEOUT = 10_000L;
 
@@ -92,6 +92,17 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 
 	private boolean closeStreamAfterSend;
 
+	private String unsolicitedMessageChannelName;
+
+	private MessageChannel unsolicitedMessageChannel;
+
+	public void setConnectionFactory(AbstractClientConnectionFactory connectionFactory) {
+		this.connectionFactory = connectionFactory;
+		connectionFactory.registerListener(this);
+		connectionFactory.registerSender(this);
+		this.isSingleUse = connectionFactory.isSingleUse();
+	}
+
 	/**
 	 * @param requestTimeout the requestTimeout to set
 	 */
@@ -103,7 +114,7 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 	 * @param remoteTimeout the remoteTimeout to set
 	 */
 	public void setRemoteTimeout(long remoteTimeout) {
-		this.remoteTimeoutExpression = new LiteralExpression("" + remoteTimeout);
+		this.remoteTimeoutExpression = new ValueExpression<>(remoteTimeout);
 	}
 
 	/**
@@ -119,29 +130,53 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 		this.evaluationContextSet = true;
 	}
 
-	@Override
-	protected void doInit() {
-		super.doInit();
-		if (!this.evaluationContextSet) {
-			this.evaluationContext = ExpressionUtils.createStandardEvaluationContext(getBeanFactory());
-		}
-		Assert.state(!this.closeStreamAfterSend || this.isSingleUse,
-				"Single use connection needed with closeStreamAfterSend");
-		if (isAsync()) {
-			try {
-				TcpConnectionSupport connection = this.connectionFactory.getConnection();
-				if (connection instanceof TcpNioConnectionSupport) {
-					setAsync(false);
-					this.logger.warn("Async replies are not supported with NIO; see the reference manual");
-				}
-				if (this.isSingleUse) {
-					connection.close();
-				}
-			}
-			catch (Exception e) {
-				this.logger.error("Could not check if async is supported", e);
-			}
-		}
+	/**
+	 * Specify the Spring Integration reply channel. If this property is not
+	 * set the gateway will check for a 'replyChannel' header on the request.
+	 * @param replyChannel The reply channel.
+	 */
+	public void setReplyChannel(MessageChannel replyChannel) {
+		setOutputChannel(replyChannel);
+	}
+
+	/**
+	 * Specify the Spring Integration reply channel name. If this property is not
+	 * set the gateway will check for a 'replyChannel' header on the request.
+	 * @param replyChannel The reply channel.
+	 * @since 5.0
+	 */
+	public void setReplyChannelName(String replyChannel) {
+		setOutputChannelName(replyChannel);
+	}
+
+	/**
+	 * Set the channel name for unsolicited incoming messages, or late replies.
+	 * @param unsolicitedMessageChannelName the channel name.
+	 * @since 5.4
+	 */
+	public void setUnsolicitedMessageChannelName(String unsolicitedMessageChannelName) {
+		this.unsolicitedMessageChannelName = unsolicitedMessageChannelName;
+	}
+
+	/**
+	 * Set the channel for unsolicited incoming messages, or late replies.
+	 * @param unsolicitedMessageChannel the channel.
+	 * @since 5.4
+	 */
+	public void setUnsolicitedMessageChannel(MessageChannel unsolicitedMessageChannel) {
+		this.unsolicitedMessageChannel = unsolicitedMessageChannel;
+	}
+
+	/**
+	 * Set to true to close the connection ouput stream after sending without
+	 * closing the connection. Use to signal EOF to the server, such as when using
+	 * a {@link org.springframework.integration.ip.tcp.serializer.ByteArrayRawSerializer}.
+	 * Requires a single-use connection factory.
+	 * @param closeStreamAfterSend true to close.
+	 * @since 5.2
+	 */
+	public void setCloseStreamAfterSend(boolean closeStreamAfterSend) {
+		this.closeStreamAfterSend = closeStreamAfterSend;
 	}
 
 	/**
@@ -157,9 +192,23 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 	}
 
 	@Override
+	public String getComponentType() {
+		return "ip:tcp-outbound-gateway";
+	}
+
+	@Override
+	protected void doInit() {
+		super.doInit();
+		if (!this.evaluationContextSet) {
+			this.evaluationContext = ExpressionUtils.createStandardEvaluationContext(getBeanFactory());
+		}
+		Assert.state(!this.closeStreamAfterSend || this.isSingleUse,
+				"Single use connection needed with closeStreamAfterSend");
+	}
+
+	@Override
 	protected Object handleRequestMessage(Message<?> requestMessage) {
-		Assert.notNull(this.connectionFactory, this.getClass().getName() +
-				" requires a client connection factory");
+		Assert.notNull(this.connectionFactory, () -> getClass().getName() + " requires a client connection factory");
 		boolean haveSemaphore = false;
 		TcpConnection connection = null;
 		String connectionId = null;
@@ -167,13 +216,13 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 		try {
 			haveSemaphore = acquireSemaphoreIfNeeded(requestMessage);
 			connection = this.connectionFactory.getConnection();
+			checkAsync(connection, async);
 			Long remoteTimeout = getRemoteTimeout(requestMessage);
 			AsyncReply reply = new AsyncReply(remoteTimeout, connection, haveSemaphore, requestMessage, async);
 			connectionId = connection.getConnectionId();
 			this.pendingReplies.put(connectionId, reply);
-			if (logger.isDebugEnabled()) {
-				logger.debug("Added pending reply " + connectionId);
-			}
+			String connectionIdToLog = connectionId;
+			logger.debug(() -> "Added pending reply " + connectionIdToLog);
 			connection.send(requestMessage);
 			if (this.closeStreamAfterSend) {
 				connection.shutdownOutput();
@@ -185,21 +234,26 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 				return getReply(requestMessage, connection, connectionId, reply);
 			}
 		}
-		catch (RuntimeException | IOException e) {
-			logger.error("Tcp Gateway exception", e);
-			if (e instanceof MessagingException) {
-				throw (MessagingException) e;
-			}
-			throw new MessagingException("Failed to send or receive", e);
+		catch (RuntimeException | IOException ex) {
+			logger.error(ex, "Tcp Gateway exception");
+			throw IntegrationUtils.wrapInHandlingExceptionIfNecessary(requestMessage,
+					() -> "Failed to send or receive", ex);
 		}
-		catch (InterruptedException e) {
+		catch (InterruptedException ex) {
 			Thread.currentThread().interrupt();
-			throw new MessageHandlingException(requestMessage, "Interrupted in the [" + this + ']', e);
+			throw new MessageHandlingException(requestMessage, "Interrupted in the [" + this + ']', ex);
 		}
 		finally {
 			if (!async) {
 				cleanUp(haveSemaphore, connection, connectionId);
 			}
+		}
+	}
+
+	private void checkAsync(TcpConnection connection, boolean async) {
+		if (async && connection instanceof TcpNioConnectionSupport) {
+			setAsync(false);
+			this.logger.warn("Async replies are not supported with NIO; see the reference manual");
 		}
 	}
 
@@ -209,9 +263,7 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 			if (!this.semaphore.tryAcquire(this.requestTimeout, TimeUnit.MILLISECONDS)) {
 				throw new MessageTimeoutException(requestMessage, "Timed out waiting for connection");
 			}
-			if (logger.isDebugEnabled()) {
-				logger.debug("got semaphore");
-			}
+			logger.debug("got semaphore");
 			return true;
 		}
 		return false;
@@ -222,10 +274,8 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 				Long.class);
 		if (remoteTimeout == null) {
 			remoteTimeout = DEFAULT_REMOTE_TIMEOUT;
-			if (logger.isWarnEnabled()) {
-				logger.warn("remoteTimeoutExpression evaluated to null; falling back to default for message "
-						+ requestMessage);
-			}
+			logger.warn(() -> "remoteTimeoutExpression evaluated to null; falling back to default for message "
+					+ requestMessage);
 		}
 		return remoteTimeout;
 	}
@@ -235,25 +285,21 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 
 		Message<?> replyMessage = reply.getReply();
 		if (replyMessage == null) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Remote Timeout on " + connectionId);
-			}
+			logger.debug(() -> "Remote Timeout on " + connectionId);
 			// The connection is dirty - force it closed.
 			this.connectionFactory.forceClose(connection);
-			throw new MessageTimeoutException(requestMessage, "Timed out waiting for response");
+			String component = getComponentName();
+			throw new MessageTimeoutException(requestMessage, "Timed out waiting for response"
+					+ (component == null ? "" : "; component: " + component));
 		}
-		if (logger.isDebugEnabled()) {
-			logger.debug("Response " + replyMessage);
-		}
+		logger.debug(() -> "Response " + replyMessage);
 		return replyMessage;
 	}
 
 	private void cleanUp(boolean haveSemaphore, TcpConnection connection, String connectionId) {
 		if (connectionId != null) {
 			this.pendingReplies.remove(connectionId);
-			if (logger.isDebugEnabled()) {
-				logger.debug("Removed pending reply " + connectionId);
-			}
+			logger.debug(() -> "Removed pending reply " + connectionId);
 			if (this.isSingleUse) {
 				connection.close();
 			}
@@ -268,13 +314,14 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 	public boolean onMessage(Message<?> message) {
 		String connectionId = message.getHeaders().get(IpHeaders.CONNECTION_ID, String.class);
 		if (connectionId == null) {
+			if (unsolicitedSupported(message)) {
+				return false;
+			}
 			logger.error("Cannot correlate response - no connection id");
 			publishNoConnectionEvent(message, null, "Cannot correlate response - no connection id");
 			return false;
 		}
-		if (logger.isTraceEnabled()) {
-			logger.trace("onMessage: " + connectionId + "(" + message + ")");
-		}
+		logger.trace(() -> "onMessage: " + connectionId + "(" + message + ")");
 		AsyncReply reply = this.pendingReplies.get(connectionId);
 		if (reply == null) {
 			if (message instanceof ErrorMessage) {
@@ -285,6 +332,9 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 				return false;
 			}
 			else {
+				if (unsolicitedSupported(message)) {
+					return false;
+				}
 				String errorMessage = "Cannot correlate response - no pending reply for " + connectionId;
 				logger.error(errorMessage);
 				publishNoConnectionEvent(message, connectionId, errorMessage);
@@ -301,19 +351,30 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 		return false;
 	}
 
+	private boolean unsolicitedSupported(Message<?> message) {
+		String channelName = this.unsolicitedMessageChannelName;
+		if (channelName != null) {
+			this.unsolicitedMessageChannel = getChannelResolver().resolveDestination(channelName);
+			this.unsolicitedMessageChannelName = null;
+		}
+		if (this.unsolicitedMessageChannel != null) {
+			try {
+				this.messagingTemplate.send(this.unsolicitedMessageChannel, message);
+			}
+			catch (Exception ex) {
+				logger.error(ex, "Failed to send unsolicited message " + message);
+			}
+			return true;
+		}
+		return false;
+	}
+
 	private void publishNoConnectionEvent(Message<?> message, String connectionId, String errorMessage) {
 		ApplicationEventPublisher applicationEventPublisher = this.connectionFactory.getApplicationEventPublisher();
 		if (applicationEventPublisher != null) {
 			applicationEventPublisher.publishEvent(new TcpConnectionFailedCorrelationEvent(this, connectionId,
 					new MessagingException(message, errorMessage)));
 		}
-	}
-
-	public void setConnectionFactory(AbstractClientConnectionFactory connectionFactory) {
-		this.connectionFactory = connectionFactory;
-		connectionFactory.registerListener(this);
-		connectionFactory.registerSender(this);
-		this.isSingleUse = connectionFactory.isSingleUse();
 	}
 
 	@Override
@@ -324,42 +385,6 @@ public class TcpOutboundGateway extends AbstractReplyProducingMessageHandler
 	@Override
 	public void removeDeadConnection(TcpConnection connection) {
 		// do nothing - no asynchronous multiplexing supported
-	}
-
-	/**
-	 * Specify the Spring Integration reply channel. If this property is not
-	 * set the gateway will check for a 'replyChannel' header on the request.
-	 * @param replyChannel The reply channel.
-	 */
-	public void setReplyChannel(MessageChannel replyChannel) {
-		this.setOutputChannel(replyChannel);
-	}
-
-	/**
-	 * Specify the Spring Integration reply channel name. If this property is not
-	 * set the gateway will check for a 'replyChannel' header on the request.
-	 * @param replyChannel The reply channel.
-	 * @since 5.0
-	 */
-	public void setReplyChannelName(String replyChannel) {
-		this.setOutputChannelName(replyChannel);
-	}
-
-	/**
-	 * Set to true to close the connection ouput stream after sending without
-	 * closing the connection. Use to signal EOF to the server, such as when using
-	 * a {@link org.springframework.integration.ip.tcp.serializer.ByteArrayRawSerializer}.
-	 * Requires a single-use connection factory.
-	 * @param closeStreamAfterSend true to close.
-	 * @since 5.2
-	 */
-	public void setCloseStreamAfterSend(boolean closeStreamAfterSend) {
-		this.closeStreamAfterSend = closeStreamAfterSend;
-	}
-
-	@Override
-	public String getComponentType() {
-		return "ip:tcp-outbound-gateway";
 	}
 
 	@Override

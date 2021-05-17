@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import static org.mockito.Mockito.mock;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.messaging.simp.stomp.StompClientSupport;
 import org.springframework.messaging.simp.stomp.StompHeaders;
@@ -35,6 +35,7 @@ import org.springframework.util.concurrent.SettableListenableFuture;
 
 /**
  * @author Artem Bilan
+ *
  * @since 4.2.9
  */
 public class StompSessionManagerTests {
@@ -53,7 +54,7 @@ public class StompSessionManagerTests {
 					throw new RuntimeException("intentional");
 				}
 				else {
-					SettableListenableFuture<StompSession> future = new SettableListenableFuture<StompSession>();
+					SettableListenableFuture<StompSession> future = new SettableListenableFuture<>();
 					StompSession stompSession = mock(StompSession.class);
 					future.set(stompSession);
 					handler.afterConnected(stompSession, getConnectHeaders());
@@ -65,7 +66,7 @@ public class StompSessionManagerTests {
 
 		sessionManager.start();
 
-		final SettableListenableFuture<StompSession> stompSessionFuture = new SettableListenableFuture<StompSession>();
+		final SettableListenableFuture<StompSession> stompSessionFuture = new SettableListenableFuture<>();
 		sessionManager.connect(new StompSessionHandlerAdapter() {
 
 			@Override

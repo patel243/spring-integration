@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,7 @@ import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.List;
 
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,8 +34,7 @@ import org.springframework.integration.handler.DelayHandler;
 import org.springframework.integration.test.util.TestUtils;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageHandler;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.interceptor.MatchAlwaysTransactionAttributeSource;
 import org.springframework.transaction.interceptor.NameMatchTransactionAttributeSource;
@@ -51,8 +49,7 @@ import org.springframework.transaction.interceptor.TransactionInterceptor;
  *
  * @since 1.0.3
  */
-@RunWith(SpringJUnit4ClassRunner.class)
-@ContextConfiguration
+@SpringJUnitConfig
 public class DelayerParserTests {
 
 	@Autowired
@@ -63,14 +60,14 @@ public class DelayerParserTests {
 		DelayHandler delayHandler = context.getBean("delayerWithDefaultScheduler.handler", DelayHandler.class);
 		assertThat(delayHandler.getOrder()).isEqualTo(99);
 		assertThat(delayHandler.getOutputChannel()).isSameAs(this.context.getBean("output"));
-		assertThat(TestUtils.getPropertyValue(delayHandler, "defaultDelay", Long.class)).isEqualTo(new Long(1234));
+		assertThat(TestUtils.getPropertyValue(delayHandler, "defaultDelay", Long.class)).isEqualTo(1234L);
 		//INT-2243
 		assertThat(TestUtils.getPropertyValue(delayHandler, "delayExpression")).isNotNull();
 		assertThat(TestUtils.getPropertyValue(delayHandler, "delayExpression", Expression.class).getExpressionString())
 				.isEqualTo("headers.foo");
 		assertThat(TestUtils.getPropertyValue(delayHandler, "messagingTemplate.sendTimeout", Long.class))
-				.isEqualTo(new Long(987));
-		assertThat(TestUtils.getPropertyValue(delayHandler, "taskScheduler")).isNull();
+				.isEqualTo(987L);
+		assertThat(TestUtils.getPropertyValue(delayHandler, "taskScheduler")).isNotNull();
 	}
 
 	@Test
@@ -110,7 +107,8 @@ public class DelayerParserTests {
 		assertThat(adviceChain.size()).isEqualTo(1);
 		Object advice = adviceChain.get(0);
 		assertThat(advice instanceof TransactionInterceptor).isTrue();
-		TransactionAttributeSource transactionAttributeSource = ((TransactionInterceptor) advice).getTransactionAttributeSource();
+		TransactionAttributeSource transactionAttributeSource =
+				((TransactionInterceptor) advice).getTransactionAttributeSource();
 		assertThat(transactionAttributeSource instanceof MatchAlwaysTransactionAttributeSource).isTrue();
 		Method method = MessageHandler.class.getMethod("handleMessage", Message.class);
 		TransactionDefinition definition = transactionAttributeSource.getTransactionAttribute(method, null);
@@ -130,7 +128,8 @@ public class DelayerParserTests {
 
 		Object txAdvice = adviceChain.get(1);
 		assertThat(txAdvice.getClass()).isEqualTo(TransactionInterceptor.class);
-		TransactionAttributeSource transactionAttributeSource = ((TransactionInterceptor) txAdvice).getTransactionAttributeSource();
+		TransactionAttributeSource transactionAttributeSource =
+				((TransactionInterceptor) txAdvice).getTransactionAttributeSource();
 		assertThat(transactionAttributeSource.getClass()).isEqualTo(NameMatchTransactionAttributeSource.class);
 		HashMap<?, ?> nameMap = TestUtils.getPropertyValue(transactionAttributeSource, "nameMap", HashMap.class);
 		assertThat(nameMap.toString()).isEqualTo("{*=PROPAGATION_REQUIRES_NEW,ISOLATION_DEFAULT,readOnly}");

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,9 +29,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
-import org.apache.commons.logging.Log;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.BeanNameAware;
@@ -40,6 +41,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.core.log.LogAccessor;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.expression.Expression;
 import org.springframework.integration.channel.QueueChannel;
@@ -62,7 +64,7 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.MonoProcessor;
+import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
 
 /**
@@ -88,14 +90,14 @@ public class GatewayParserTests {
 		Message<?> result = channel.receive(10000);
 		assertThat(result.getPayload()).isEqualTo("foo");
 
-		MonoProcessor<Object> defaultMethodHandler = MonoProcessor.create();
+		Sinks.One<Object> defaultMethodHandler = Sinks.one();
 
-		this.errorChannel.subscribe(message -> defaultMethodHandler.onNext(message.getPayload()));
+		this.errorChannel.subscribe(message -> defaultMethodHandler.tryEmitValue(message.getPayload()));
 
 		String defaultMethodPayload = "defaultMethodPayload";
 		service.defaultMethodGateway(defaultMethodPayload);
 
-		StepVerifier.create(defaultMethodHandler)
+		StepVerifier.create(defaultMethodHandler.asMono())
 				.expectNext(defaultMethodPayload)
 				.verifyComplete();
 	}
@@ -274,7 +276,7 @@ public class GatewayParserTests {
 	@Test
 	public void testCustomCompletableNoAsyncAttemptAsync() throws Exception {
 		Object gateway = context.getBean("&customCompletableAttemptAsync");
-		Log logger = spy(TestUtils.getPropertyValue(gateway, "logger", Log.class));
+		LogAccessor logger = spy(TestUtils.getPropertyValue(gateway, "logger", LogAccessor.class));
 		when(logger.isDebugEnabled()).thenReturn(true);
 		new DirectFieldAccessor(gateway).setPropertyValue("logger", logger);
 		QueueChannel requestChannel = (QueueChannel) context.getBean("requestChannel");
@@ -296,9 +298,12 @@ public class GatewayParserTests {
 		assertThat(reply).isEqualTo("SYNC_CUSTOM_COMPLETABLE");
 		assertThat(thread.get()).isEqualTo(Thread.currentThread());
 		assertThat(TestUtils.getPropertyValue(gateway, "asyncExecutor")).isNotNull();
-		verify(logger).debug("AsyncTaskExecutor submit*() return types are incompatible with the method return type; "
-				+ "running on calling thread; the downstream flow must return the required Future: "
-				+ "MyCompletableFuture");
+		verify(logger).debug(ArgumentMatchers.<Supplier<String>>argThat(logMessage ->
+				logMessage.get()
+						.equals("AsyncTaskExecutor submit*() return types are incompatible "
+								+ "with the method return type; "
+								+ "running on calling thread; the downstream flow must return the required Future: "
+								+ "MyCompletableFuture")));
 	}
 
 	@Test

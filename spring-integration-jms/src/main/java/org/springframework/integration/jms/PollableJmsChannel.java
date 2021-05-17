@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,10 +38,8 @@ import org.springframework.messaging.support.ExecutorChannelInterceptor;
  *
  * @since 2.0
  */
-@SuppressWarnings("deprecation")
 public class PollableJmsChannel extends AbstractJmsChannel
-		implements PollableChannel, org.springframework.integration.support.management.PollableChannelManagement,
-		ExecutorChannelInterceptorAware {
+		implements PollableChannel, ExecutorChannelInterceptorAware {
 
 	private String messageSelector;
 
@@ -55,50 +53,6 @@ public class PollableJmsChannel extends AbstractJmsChannel
 
 	public void setMessageSelector(String messageSelector) {
 		this.messageSelector = messageSelector;
-	}
-
-	/**
-	 * Deprecated.
-	 * @return receive count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public int getReceiveCount() {
-		return getMetrics().getReceiveCount();
-	}
-
-	/**
-	 * Deprecated.
-	 * @return receive count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public long getReceiveCountLong() {
-		return getMetrics().getReceiveCountLong();
-	}
-
-	/**
-	 * Deprecated.
-	 * @return receive error count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public int getReceiveErrorCount() {
-		return getMetrics().getReceiveErrorCount();
-	}
-
-	/**
-	 * Deprecated.
-	 * @return receive error count
-	 * @deprecated in favor of Micrometer metrics.
-	 */
-	@Deprecated
-	@Override
-	public long getReceiveErrorCountLong() {
-		return getMetrics().getReceiveErrorCountLong();
 	}
 
 	@Override
@@ -119,10 +73,9 @@ public class PollableJmsChannel extends AbstractJmsChannel
 		ChannelInterceptorList interceptorList = getIChannelInterceptorList();
 		Deque<ChannelInterceptor> interceptorStack = null;
 		boolean counted = false;
-		boolean countsEnabled = isCountsEnabled();
 		try {
-			if (isLoggingEnabled() && logger.isTraceEnabled()) {
-				logger.trace("preReceive on channel '" + this + "'");
+			if (isLoggingEnabled()) {
+				logger.trace(() -> "preReceive on channel '" + this + "'");
 			}
 			if (interceptorList.getInterceptors().size() > 0) {
 				interceptorStack = new ArrayDeque<>();
@@ -131,38 +84,13 @@ public class PollableJmsChannel extends AbstractJmsChannel
 					return null;
 				}
 			}
-			Object object;
-			if (this.messageSelector == null) {
-				object = getJmsTemplate().receiveAndConvert();
-			}
-			else {
-				object = getJmsTemplate().receiveSelectedAndConvert(this.messageSelector);
+
+			Message<?> message = receiveAndConvertToMessage();
+			if (message != null) {
+				incrementReceiveCounter();
+				counted = true;
 			}
 
-			Message<?> message = null;
-			if (object == null) {
-				if (isLoggingEnabled() && logger.isTraceEnabled()) {
-					logger.trace("postReceive on channel '" + this + "', message is null");
-				}
-			}
-			else {
-				if (countsEnabled) {
-					incrementReceiveCounter();
-					getMetrics().afterReceive();
-					counted = true;
-				}
-				if (object instanceof Message<?>) {
-					message = (Message<?>) object;
-				}
-				else {
-					message = getMessageBuilderFactory()
-							.withPayload(object)
-							.build();
-				}
-				if (isLoggingEnabled() && logger.isDebugEnabled()) {
-					logger.debug("postReceive on channel '" + this + "', message: " + message);
-				}
-			}
 			if (interceptorStack != null && message != null) {
 				message = interceptorList.postReceive(message, this);
 			}
@@ -170,11 +98,44 @@ public class PollableJmsChannel extends AbstractJmsChannel
 			return message;
 		}
 		catch (RuntimeException ex) {
-			if (countsEnabled && !counted) {
+			if (!counted) {
 				incrementReceiveErrorCounter(ex);
 			}
 			interceptorList.afterReceiveCompletion(null, this, ex, interceptorStack);
 			throw ex;
+		}
+	}
+
+	@Nullable
+	private Message<?> receiveAndConvertToMessage() {
+		Object object;
+		if (this.messageSelector == null) {
+			object = getJmsTemplate().receiveAndConvert();
+		}
+		else {
+			object = getJmsTemplate().receiveSelectedAndConvert(this.messageSelector);
+		}
+
+		if (object == null) {
+			if (isLoggingEnabled()) {
+				logger.trace(() -> "postReceive on channel '" + this + "', message is null");
+			}
+			return null;
+		}
+		else {
+			Message<?> message;
+			if (object instanceof Message<?>) {
+				message = (Message<?>) object;
+			}
+			else {
+				message = getMessageBuilderFactory()
+						.withPayload(object)
+						.build();
+			}
+			if (isLoggingEnabled()) {
+				logger.debug(() -> "postReceive on channel '" + this + "', message: " + message);
+			}
+			return message;
 		}
 	}
 
@@ -193,7 +154,6 @@ public class PollableJmsChannel extends AbstractJmsChannel
 		if (metricsCaptor != null) {
 			buildReceiveCounter(metricsCaptor, ex).increment();
 		}
-		getMetrics().afterError();
 	}
 
 	private CounterFacade buildReceiveCounter(MetricsCaptor metricsCaptor, @Nullable Exception ex) {

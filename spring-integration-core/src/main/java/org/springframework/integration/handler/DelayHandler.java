@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import org.aopalliance.aop.Advice;
 
@@ -51,6 +52,8 @@ import org.springframework.messaging.MessagingException;
 import org.springframework.messaging.core.DestinationResolver;
 import org.springframework.messaging.support.ErrorMessage;
 import org.springframework.scheduling.TaskScheduler;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.ObjectUtils;
@@ -298,8 +301,8 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 		else {
 			Assert.isInstanceOf(MessageStore.class, this.messageStore);
 		}
-		this.evaluationContext = ExpressionUtils.createStandardEvaluationContext(this.getBeanFactory());
-		this.releaseHandler = this.createReleaseMessageTask();
+		this.evaluationContext = ExpressionUtils.createStandardEvaluationContext(getBeanFactory());
+		this.releaseHandler = createReleaseMessageTask();
 	}
 
 	private MessageHandler createReleaseMessageTask() {
@@ -321,7 +324,7 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 	}
 
 	/**
-	 * Checks if 'requestMessage' wasn't delayed before ({@link #releaseMessageAfterDelay}
+	 * Check if 'requestMessage' wasn't delayed before ({@link #releaseMessageAfterDelay}
 	 * and {@link DelayHandler.DelayedMessageWrapper}). Than determine 'delay' for
 	 * 'requestMessage' ({@link #determineDelayForMessage}) and if {@code delay > 0}
 	 * schedules 'releaseMessage' task after 'delay'.
@@ -343,7 +346,9 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 		}
 
 		// no delay
-		return delayed ? ((DelayedMessageWrapper) requestMessage.getPayload()).getOriginal() : requestMessage;
+		return delayed
+				? ((DelayedMessageWrapper) requestMessage.getPayload()).getOriginal()
+				: requestMessage;
 	}
 
 	private long determineDelayForMessage(Message<?> message) {
@@ -365,15 +370,18 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 		Object delayValue = null;
 		try {
 			delayValue = this.delayExpression.getValue(this.evaluationContext,
-					delayedMessageWrapper != null ? delayedMessageWrapper.getOriginal() : message);
+					delayedMessageWrapper != null
+							? delayedMessageWrapper.getOriginal()
+							: message);
 		}
 		catch (EvaluationException e) {
 			delayValueException = e;
 		}
 		if (delayValue instanceof Date) {
-			long current = delayedMessageWrapper != null
-					? delayedMessageWrapper.getRequestDate()
-					: System.currentTimeMillis();
+			long current =
+					delayedMessageWrapper != null
+							? delayedMessageWrapper.getRequestDate()
+							: System.currentTimeMillis();
 			delay = ((Date) delayValue).getTime() - current;
 		}
 		else if (delayValue != null) {
@@ -392,22 +400,19 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 
 	private void handleDelayValueException(Exception delayValueException) {
 		if (this.ignoreExpressionFailures) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Failed to get delay value from 'delayExpression': " +
-						delayValueException.getMessage() +
-						". Will fall back to default delay: " + this.defaultDelay);
-			}
+			logger.debug(() -> "Failed to get delay value from 'delayExpression': " +
+					delayValueException.getMessage() +
+					". Will fall back to default delay: " + this.defaultDelay);
 		}
 		else {
-			throw new IllegalStateException("Error occurred during 'delay' value determination",
-					delayValueException);
+			throw new IllegalStateException("Error occurred during 'delay' value determination", delayValueException);
 		}
 	}
 
 	private void releaseMessageAfterDelay(final Message<?> message, long delay) {
 		Message<?> delayedMessage = message;
 
-		DelayedMessageWrapper messageWrapper = null;
+		DelayedMessageWrapper messageWrapper;
 		if (message.getPayload() instanceof DelayedMessageWrapper) {
 			messageWrapper = (DelayedMessageWrapper) message.getPayload();
 		}
@@ -438,17 +443,32 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 			};
 		}
 
-		getTaskScheduler().schedule(releaseTask, new Date(messageWrapper.getRequestDate() + delay));
+		Date startTime = new Date(messageWrapper.getRequestDate() + delay);
+
+		if (TransactionSynchronizationManager.isSynchronizationActive() &&
+				TransactionSynchronizationManager.isActualTransactionActive()) {
+
+			TransactionSynchronizationManager.registerSynchronization(
+					new TransactionSynchronization() {
+
+						@Override
+						public void afterCommit() {
+							getTaskScheduler().schedule(releaseTask, startTime);
+						}
+
+					});
+		}
+		else {
+			getTaskScheduler().schedule(releaseTask, startTime);
+		}
 	}
 
 	private Message<?> getMessageById(UUID messageId) {
 		Message<?> theMessage = ((MessageStore) this.messageStore).getMessage(messageId);
 
 		if (theMessage == null) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("No message in the Message Store for id: " + messageId +
-						". Likely another instance has already released it.");
-			}
+			logger.debug(() -> "No message in the Message Store for id: " + messageId +
+					". Likely another instance has already released it.");
 			return null;
 		}
 		else {
@@ -471,9 +491,7 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 						message);
 				try {
 					if (!(getErrorChannel().send(errorMessage))) {
-						if (this.logger.isDebugEnabled()) {
-							this.logger.debug("Failed to send error message: " + errorMessage);
-						}
+						this.logger.debug(() -> "Failed to send error message: " + errorMessage);
 						rescheduleForRetry(message, identity);
 					}
 					else {
@@ -481,16 +499,12 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 					}
 				}
 				catch (Exception e1) {
-					if (this.logger.isDebugEnabled()) {
-						logger.debug("Error flow threw an exception for message: " + message, e1);
-					}
+					logger.debug(e1, () -> "Error flow threw an exception for message: " + message);
 					rescheduleForRetry(message, identity);
 				}
 			}
 			else {
-				if (this.logger.isDebugEnabled()) {
-					logger.debug("Release flow threw an exception for message: " + message, e);
-				}
+				logger.debug(e, () -> "Release flow threw an exception for message: " + message);
 				if (!rescheduleForRetry(message, identity)) {
 					throw e; // there might be an error handler on the scheduler
 				}
@@ -500,7 +514,7 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 
 	private boolean rescheduleForRetry(Message<?> message, String identity) {
 		if (this.deliveries.get(identity).incrementAndGet() >= this.maxAttempts) {
-			this.logger.error("Discarding; maximum release attempts reached for: " + message);
+			this.logger.error(() -> "Discarding; maximum release attempts reached for: " + message);
 			this.deliveries.remove(identity);
 			return false;
 		}
@@ -530,8 +544,8 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 			}
 			handleMessageInternal(message);
 		}
-		else if (logger.isDebugEnabled()) {
-			logger.debug("No message in the Message Store to release: " + message +
+		else {
+			logger.debug(() -> "No message in the Message Store to release: " + message +
 					". Likely another instance has already released it.");
 		}
 	}
@@ -568,9 +582,10 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 	@Override
 	public synchronized void reschedulePersistedMessages() {
 		MessageGroup messageGroup = this.messageStore.getMessageGroup(this.messageGroupId);
-		for (final Message<?> message : messageGroup.getMessages()) {
-			getTaskScheduler()
-					.schedule(() -> {
+		try (Stream<Message<?>> messageStream = messageGroup.streamMessages()) {
+			TaskScheduler taskScheduler = getTaskScheduler();
+			messageStream.forEach((message) -> // NOSONAR
+					taskScheduler.schedule(() -> {
 						// This is fine to keep the reference to the message,
 						// because the scheduled task is performed immediately.
 						long delay = determineDelayForMessage(message);
@@ -580,12 +595,12 @@ public class DelayHandler extends AbstractReplyProducingMessageHandler implement
 						else {
 							releaseMessage(message);
 						}
-					}, new Date());
+					}, new Date()));
 		}
 	}
 
 	/**
-	 * Handles {@link ContextRefreshedEvent} to invoke
+	 * Handle {@link ContextRefreshedEvent} to invoke
 	 * {@link #reschedulePersistedMessages} as late as possible after application context
 	 * startup. Also it checks {@link #initialized} to ignore other
 	 * {@link ContextRefreshedEvent}s which may be published in the 'parent-child'

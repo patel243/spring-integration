@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -87,6 +87,7 @@ public class TcpNioClientConnectionFactory extends
 		try {
 			SocketChannel socketChannel = SocketChannel.open();
 			setSocketAttributes(socketChannel.socket());
+			connect(socketChannel);
 			TcpNioConnection connection =
 					this.tcpNioConnectionSupport.createNewConnection(socketChannel, false, isLookupHost(),
 							getApplicationEventPublisher(), getComponentName());
@@ -97,23 +98,15 @@ public class TcpNioClientConnectionFactory extends
 				((TcpNioSSLConnection) connection).setHandshakeTimeout(sslHandshakeTimeout);
 			}
 			TcpConnectionSupport wrappedConnection = wrapConnection(connection);
+			if (!wrappedConnection.equals(connection)) {
+				connection.setSenders(getSenders());
+			}
 			initializeConnection(wrappedConnection, socketChannel.socket());
-			socketChannel.configureBlocking(false);
-			socketChannel.connect(new InetSocketAddress(getHost(), getPort()));
-			boolean connected = socketChannel.finishConnect();
-			long timeLeft = getConnectTimeout().toMillis();
-			while (!connected && timeLeft > 0) {
-				Thread.sleep(50); // NOSONAR Magic #
-				connected = socketChannel.finishConnect();
-				timeLeft -= 50; // NOSONAR Magic #
-			}
-			if (!connected) {
-				throw new IOException("Not connected after connectTimeout");
-			}
 			if (getSoTimeout() > 0) {
 				connection.setLastRead(System.currentTimeMillis());
 			}
 			this.channelMap.put(socketChannel, connection);
+			wrappedConnection.publishConnectionOpenEvent();
 			this.newChannels.add(socketChannel);
 			this.selector.wakeup();
 			return wrappedConnection;
@@ -124,6 +117,21 @@ public class TcpNioClientConnectionFactory extends
 		catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 			throw new UncheckedIOException(new IOException(e));
+		}
+	}
+
+	private void connect(SocketChannel socketChannel) throws IOException, InterruptedException {
+		socketChannel.configureBlocking(false);
+		socketChannel.connect(new InetSocketAddress(getHost(), getPort()));
+		boolean connected = socketChannel.finishConnect();
+		long timeLeft = getConnectTimeout().toMillis();
+		while (!connected && timeLeft > 0) {
+			Thread.sleep(5); // NOSONAR Magic #
+			connected = socketChannel.finishConnect();
+			timeLeft -= 5; // NOSONAR Magic #
+		}
+		if (!connected) {
+			throw new IOException("Not connected after connectTimeout");
 		}
 	}
 
@@ -153,8 +161,8 @@ public class TcpNioClientConnectionFactory extends
 			try {
 				this.selector.close();
 			}
-			catch (Exception e) {
-				logger.error("Error closing selector", e);
+			catch (Exception ex) {
+				logger.error(ex, "Error closing selector");
 			}
 		}
 		super.stop();
@@ -173,9 +181,7 @@ public class TcpNioClientConnectionFactory extends
 
 	@Override
 	public void run() {
-		if (logger.isDebugEnabled()) {
-			logger.debug("Read selector running for connections to " + getHost() + ":" + getPort());
-		}
+		logger.debug(() -> "Read selector running for connections to " + getHost() + ':' + getPort());
 		try {
 			this.selector = Selector.open();
 			while (isActive()) {
@@ -184,16 +190,14 @@ public class TcpNioClientConnectionFactory extends
 		}
 		catch (ClosedSelectorException cse) {
 			if (isActive()) {
-				logger.error("Selector closed", cse);
+				logger.error(cse, "Selector closed");
 			}
 		}
-		catch (Exception e) {
-			logger.error("Exception in read selector thread", e);
+		catch (Exception ex) {
+			logger.error(ex, "Exception in read selector thread");
 			setActive(false);
 		}
-		if (logger.isDebugEnabled()) {
-			logger.debug("Read selector exiting for connections to " + getHost() + ":" + getPort());
-		}
+		logger.debug(() -> "Read selector exiting for connections to " + getHost() + ':' + getPort());
 	}
 
 	private void processSelectorWhileActive() throws IOException {

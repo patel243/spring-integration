@@ -222,7 +222,7 @@ public abstract class MessageProducerSupport extends AbstractEndpoint implements
 						.map(this::trackMessageIfAny)
 						.doOnComplete(this::stop)
 						.doOnCancel(this::stop)
-						.takeWhile((message) -> isRunning());
+						.takeWhile((message) -> isActive());
 
 		if (channelForSubscription instanceof ReactiveStreamsSubscribableChannel) {
 			((ReactiveStreamsSubscribableChannel) channelForSubscription).subscribeTo(messageFlux);
@@ -234,7 +234,7 @@ public abstract class MessageProducerSupport extends AbstractEndpoint implements
 							sendMessage(message);
 						}
 						catch (Exception ex) {
-							logger.error("Error sending a message: " + message, ex);
+							logger.error(ex, () -> "Error sending a message: " + message);
 						}
 					})
 					.subscribe();
@@ -248,7 +248,7 @@ public abstract class MessageProducerSupport extends AbstractEndpoint implements
 	 * @return true if the error channel is available and message sent.
 	 * @since 4.3.10
 	 */
-	protected final boolean sendErrorMessageIfNecessary(Message<?> message, Exception exception) {
+	protected final boolean sendErrorMessageIfNecessary(@Nullable Message<?> message, Exception exception) {
 		MessageChannel channel = getErrorChannel();
 		if (channel != null) {
 			this.messagingTemplate.send(channel, buildErrorMessage(message, exception));
@@ -265,7 +265,7 @@ public abstract class MessageProducerSupport extends AbstractEndpoint implements
 	 * @return the error message.
 	 * @since 4.3.10
 	 */
-	protected final ErrorMessage buildErrorMessage(Message<?> message, Exception exception) {
+	protected final ErrorMessage buildErrorMessage(@Nullable Message<?> message, Exception exception) {
 		return this.errorMessageStrategy.buildErrorMessage(exception, getErrorMessageAttributes(message));
 	}
 
@@ -277,7 +277,7 @@ public abstract class MessageProducerSupport extends AbstractEndpoint implements
 	 * @return the attributes.
 	 * @since 4.3.10
 	 */
-	protected AttributeAccessor getErrorMessageAttributes(Message<?> message) {
+	protected AttributeAccessor getErrorMessageAttributes(@Nullable Message<?> message) {
 		return ErrorMessageUtils.getAttributeAccessor(message, null);
 	}
 

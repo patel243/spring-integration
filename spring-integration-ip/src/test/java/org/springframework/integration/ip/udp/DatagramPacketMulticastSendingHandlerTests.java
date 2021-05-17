@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,8 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
+import java.net.NetworkInterface;
+import java.util.Enumeration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -69,9 +71,9 @@ public class DatagramPacketMulticastSendingHandlerTests {
 				byte[] buffer = new byte[8];
 				DatagramPacket receivedPacket = new DatagramPacket(buffer, buffer.length);
 				MulticastSocket socket1 = new MulticastSocket(testPort);
-				socket1.setInterface(InetAddress.getByName(multicastRule.getNic()));
+				socket1.setNetworkInterface(multicastRule.getNic());
 				InetAddress group = InetAddress.getByName(multicastAddress);
-				socket1.joinGroup(group);
+				socket1.joinGroup(new InetSocketAddress(group, 0), null);
 				listening.countDown();
 				socket1.receive(receivedPacket);
 				socket1.close();
@@ -88,13 +90,30 @@ public class DatagramPacketMulticastSendingHandlerTests {
 				e.printStackTrace();
 			}
 		};
-		Executor executor = new SimpleAsyncTaskExecutor();
+		Executor executor = new SimpleAsyncTaskExecutor("verifySendMulticast-");
 		executor.execute(catcher);
 		executor.execute(catcher);
 		assertThat(listening.await(10000, TimeUnit.MILLISECONDS)).isTrue();
 		MulticastSendingMessageHandler handler = new MulticastSendingMessageHandler(multicastAddress, testPort);
 		handler.setBeanFactory(mock(BeanFactory.class));
-		handler.setLocalAddress(this.multicastRule.getNic());
+		NetworkInterface nic = this.multicastRule.getNic();
+		if (nic != null) {
+			String hostName = null;
+			Enumeration<InetAddress> addressesFromNetworkInterface = nic.getInetAddresses();
+			while (addressesFromNetworkInterface.hasMoreElements()) {
+				InetAddress inetAddress = addressesFromNetworkInterface.nextElement();
+				if (inetAddress.isSiteLocalAddress()
+						&& !inetAddress.isAnyLocalAddress()
+						&& !inetAddress.isLinkLocalAddress()
+						&& !inetAddress.isLoopbackAddress()) {
+
+					hostName = inetAddress.getHostName();
+					break;
+				}
+			}
+
+			handler.setLocalAddress(hostName);
+		}
 		handler.afterPropertiesSet();
 		handler.handleMessage(MessageBuilder.withPayload(payload).build());
 		assertThat(received.await(10000, TimeUnit.MILLISECONDS)).isTrue();
@@ -115,20 +134,21 @@ public class DatagramPacketMulticastSendingHandlerTests {
 		final int testPort = socket.getLocalPort();
 		final AtomicInteger ackPort = new AtomicInteger();
 
-		final String multicastAddress = "225.6.7.8";
+		final String multicastAddress = this.multicastRule.getGroup();
 		final String payload = "foobar";
 		final CountDownLatch listening = new CountDownLatch(2);
 		final CountDownLatch ackListening = new CountDownLatch(1);
 		final CountDownLatch ackSent = new CountDownLatch(2);
+		NetworkInterface nic = this.multicastRule.getNic();
 		Runnable catcher = () -> {
 			try {
 				byte[] buffer = new byte[1000];
 				DatagramPacket receivedPacket = new DatagramPacket(buffer, buffer.length);
 				MulticastSocket socket1 = new MulticastSocket(testPort);
-				socket1.setInterface(InetAddress.getByName(multicastRule.getNic()));
+				socket1.setNetworkInterface(multicastRule.getNic());
 				socket1.setSoTimeout(8000);
 				InetAddress group = InetAddress.getByName(multicastAddress);
-				socket1.joinGroup(group);
+				socket1.joinGroup(new InetSocketAddress(group, 0), null);
 				listening.countDown();
 				assertThat(ackListening.await(10, TimeUnit.SECONDS)).isTrue();
 				socket1.receive(receivedPacket);
@@ -145,8 +165,21 @@ public class DatagramPacketMulticastSendingHandlerTests {
 				Message<byte[]> message = mapper.toMessage(receivedPacket);
 				Object id = message.getHeaders().get(IpHeaders.ACK_ID);
 				byte[] ack = id.toString().getBytes();
+				InetAddress inetAddress = null;
+				Enumeration<InetAddress> addressesFromNetworkInterface = nic.getInetAddresses();
+				while (addressesFromNetworkInterface.hasMoreElements()) {
+					InetAddress address = addressesFromNetworkInterface.nextElement();
+					if (address.isSiteLocalAddress()
+							&& !address.isAnyLocalAddress()
+							&& !address.isLinkLocalAddress()
+							&& !address.isLoopbackAddress()) {
+
+						inetAddress = address;
+						break;
+					}
+				}
 				DatagramPacket ackPack = new DatagramPacket(ack, ack.length,
-						new InetSocketAddress(multicastRule.getNic(), ackPort.get()));
+						new InetSocketAddress(inetAddress, ackPort.get()));
 				DatagramSocket out = new DatagramSocket();
 				out.send(ackPack);
 				out.close();
@@ -158,13 +191,30 @@ public class DatagramPacketMulticastSendingHandlerTests {
 				e.printStackTrace();
 			}
 		};
-		Executor executor = new SimpleAsyncTaskExecutor();
+		Executor executor = new SimpleAsyncTaskExecutor("verifySendMulticastWithAcks-");
 		executor.execute(catcher);
 		executor.execute(catcher);
 		assertThat(listening.await(10000, TimeUnit.MILLISECONDS)).isTrue();
 		MulticastSendingMessageHandler handler =
 				new MulticastSendingMessageHandler(multicastAddress, testPort, true, true, "localhost", 0, 10000);
-		handler.setLocalAddress(this.multicastRule.getNic());
+
+		if (nic != null) {
+			String hostName = null;
+			Enumeration<InetAddress> addressesFromNetworkInterface = nic.getInetAddresses();
+			while (addressesFromNetworkInterface.hasMoreElements()) {
+				InetAddress inetAddress = addressesFromNetworkInterface.nextElement();
+				if (inetAddress.isSiteLocalAddress()
+						&& !inetAddress.isAnyLocalAddress()
+						&& !inetAddress.isLinkLocalAddress()
+						&& !inetAddress.isLoopbackAddress()) {
+
+					hostName = inetAddress.getHostName();
+					break;
+				}
+			}
+
+			handler.setLocalAddress(hostName);
+		}
 		handler.setMinAcksForSuccess(2);
 		handler.setBeanFactory(mock(BeanFactory.class));
 		handler.afterPropertiesSet();

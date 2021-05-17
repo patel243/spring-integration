@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,8 @@
 package org.springframework.integration.configuration;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -38,11 +39,11 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.aopalliance.aop.Advice;
 import org.aopalliance.intercept.MethodInterceptor;
-import org.apache.commons.logging.Log;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.AbstractFactoryBean;
@@ -53,13 +54,18 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.Condition;
+import org.springframework.context.annotation.ConditionContext;
+import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.ImportResource;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.context.expression.EnvironmentAccessor;
 import org.springframework.context.expression.MapAccessor;
 import org.springframework.core.convert.converter.Converter;
+import org.springframework.core.log.LogAccessor;
 import org.springframework.core.serializer.support.SerializingConverter;
+import org.springframework.core.type.AnnotatedTypeMetadata;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.spel.support.ReflectivePropertyAccessor;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
@@ -74,6 +80,7 @@ import org.springframework.integration.annotation.IntegrationComponentScan;
 import org.springframework.integration.annotation.MessagingGateway;
 import org.springframework.integration.annotation.Poller;
 import org.springframework.integration.annotation.Publisher;
+import org.springframework.integration.annotation.Reactive;
 import org.springframework.integration.annotation.Role;
 import org.springframework.integration.annotation.ServiceActivator;
 import org.springframework.integration.annotation.Transformer;
@@ -99,6 +106,7 @@ import org.springframework.integration.endpoint.AbstractEndpoint;
 import org.springframework.integration.endpoint.EventDrivenConsumer;
 import org.springframework.integration.endpoint.MethodInvokingMessageSource;
 import org.springframework.integration.endpoint.PollingConsumer;
+import org.springframework.integration.endpoint.ReactiveStreamsConsumer;
 import org.springframework.integration.expression.SpelPropertyAccessorRegistrar;
 import org.springframework.integration.gateway.GatewayProxyFactoryBean;
 import org.springframework.integration.handler.ServiceActivatingHandler;
@@ -265,6 +273,9 @@ public class EnableIntegrationTests {
 	private MessageChannel bridgeToInput;
 
 	@Autowired
+	private AbstractEndpoint reactiveBridge;
+
+	@Autowired
 	private PollableChannel bridgeToOutput;
 
 	@Autowired
@@ -307,7 +318,7 @@ public class EnableIntegrationTests {
 		assertThat(TestUtils.getPropertyValue(trigger, "fixedRate", Boolean.class)).isFalse();
 
 		assertThat(this.annotationTestService.isRunning()).isTrue();
-		Log logger = spy(TestUtils.getPropertyValue(this.serviceActivatorEndpoint, "logger", Log.class));
+		LogAccessor logger = spy(TestUtils.getPropertyValue(this.serviceActivatorEndpoint, "logger", LogAccessor.class));
 		when(logger.isDebugEnabled()).thenReturn(true);
 		final CountDownLatch pollerInterruptedLatch = new CountDownLatch(1);
 		doAnswer(invocation -> {
@@ -332,7 +343,7 @@ public class EnableIntegrationTests {
 
 		trigger = TestUtils.getPropertyValue(this.serviceActivatorEndpoint2, "trigger", Trigger.class);
 		assertThat(trigger).isInstanceOf(CronTrigger.class);
-		assertThat(TestUtils.getPropertyValue(trigger, "sequenceGenerator.expression")).isEqualTo("0 5 7 * * *");
+		assertThat(TestUtils.getPropertyValue(trigger, "expression.expression")).isEqualTo("0 5 7 * * *");
 
 		trigger = TestUtils.getPropertyValue(this.serviceActivatorEndpoint3, "trigger", Trigger.class);
 		assertThat(trigger).isInstanceOf(PeriodicTrigger.class);
@@ -448,15 +459,11 @@ public class EnableIntegrationTests {
 	@Test
 	@DirtiesContext
 	public void testChangePatterns() {
-		try {
-			this.configurer.setComponentNamePatterns(new String[] { "*" });
-			fail("ExpectedException");
-		}
-		catch (IllegalStateException e) {
-			assertThat(e.getMessage()).contains("cannot be changed");
-		}
+		assertThatIllegalStateException()
+				.isThrownBy(() -> this.configurer.setComponentNamePatterns(new String[]{ "*" }))
+				.withMessageContaining("cannot be changed");
 		this.configurer.stop();
-		this.configurer.setComponentNamePatterns(new String[] { "*" });
+		this.configurer.setComponentNamePatterns(new String[]{ "*" });
 		assertThat(TestUtils.getPropertyValue(this.configurer, "componentNamePatterns", String[].class)[0])
 				.isEqualTo("*");
 	}
@@ -484,6 +491,9 @@ public class EnableIntegrationTests {
 		this.testGateway.sendAsync("foo");
 		assertThat(this.asyncAnnotationProcessLatch.await(1, TimeUnit.SECONDS)).isTrue();
 		assertThat(this.asyncAnnotationProcessThread.get()).isNotSameAs(Thread.currentThread());
+
+		assertThatExceptionOfType(NoSuchBeanDefinitionException.class)
+				.isThrownBy(() -> this.context.getBean(ConditionalGateway.class));
 	}
 
 	/**
@@ -544,11 +554,11 @@ public class EnableIntegrationTests {
 
 	@Test
 	public void testIntegrationConverter() {
-		this.numberChannel.send(new GenericMessage<Integer>(10));
-		this.numberChannel.send(new GenericMessage<Boolean>(true));
+		this.numberChannel.send(new GenericMessage<>(10));
+		this.numberChannel.send(new GenericMessage<>(true));
 		assertThat(this.testConverter.getInvoked()).isGreaterThan(0);
 
-		assertThat(this.bytesChannel.send(new GenericMessage<byte[]>("foo".getBytes()))).isTrue();
+		assertThat(this.bytesChannel.send(new GenericMessage<>("foo".getBytes()))).isTrue();
 		assertThat(this.bytesChannel.send(new GenericMessage<>(MutableMessageBuilder.withPayload("").build())))
 				.isTrue();
 
@@ -636,14 +646,10 @@ public class EnableIntegrationTests {
 		assertThat(testMessage).isSameAs(receive);
 		assertThat(this.pollableBridgeOutput.receive(10)).isNull();
 
-		try {
-			this.metaBridgeInput.send(testMessage);
-			fail("MessageDeliveryException expected");
-		}
-		catch (Exception e) {
-			assertThat(e).isInstanceOf(MessageDeliveryException.class);
-			assertThat(e.getMessage()).contains("Dispatcher has no subscribers");
-		}
+
+		assertThatExceptionOfType(MessageDeliveryException.class)
+				.isThrownBy(() -> this.metaBridgeInput.send(testMessage))
+				.withMessageContaining("Dispatcher has no subscribers");
 
 		this.context.getBean("enableIntegrationTests.ContextConfiguration.metaBridgeOutput.bridgeFrom",
 				Lifecycle.class).start();
@@ -654,6 +660,7 @@ public class EnableIntegrationTests {
 		assertThat(testMessage).isSameAs(receive);
 		assertThat(this.metaBridgeOutput.receive(10)).isNull();
 
+		assertThat(this.reactiveBridge).isInstanceOf(ReactiveStreamsConsumer.class);
 		this.bridgeToInput.send(testMessage);
 		receive = this.bridgeToOutput.receive(10_000);
 		assertThat(receive).isNotNull();
@@ -668,14 +675,9 @@ public class EnableIntegrationTests {
 		assertThat(bridgeMessage).isSameAs(receive);
 		assertThat(replyChannel.receive(10)).isNull();
 
-		try {
-			this.myBridgeToInput.send(testMessage);
-			fail("MessageDeliveryException expected");
-		}
-		catch (Exception e) {
-			assertThat(e).isInstanceOf(MessageDeliveryException.class);
-			assertThat(e.getMessage()).contains("Dispatcher has no subscribers");
-		}
+		assertThatExceptionOfType(MessageDeliveryException.class)
+				.isThrownBy(() -> this.myBridgeToInput.send(testMessage))
+				.withMessageContaining("Dispatcher has no subscribers");
 
 		this.context.getBean("enableIntegrationTests.ContextConfiguration.myBridgeToInput.bridgeTo",
 				Lifecycle.class).start();
@@ -778,7 +780,7 @@ public class EnableIntegrationTests {
 	private PollableChannel myHandlerSuccessChannel;
 
 	@Test
-	public void testAdvicedServiceActivator() {
+	public void testAdvisedServiceActivator() {
 		Date testDate = new Date();
 
 		this.myHandlerChannel.send(new GenericMessage<>(testDate));
@@ -798,7 +800,6 @@ public class EnableIntegrationTests {
 	@EnableIntegration
 	//	INT-3853
 	//	@PropertySource("classpath:org/springframework/integration/configuration/EnableIntegrationTests.properties")
-	@EnableMessageHistory({ "input", "publishedChannel", "annotationTestService*" })
 	public static class ContextConfiguration {
 
 		@Bean
@@ -885,7 +886,7 @@ public class EnableIntegrationTests {
 		@Bean
 		@GlobalChannelInterceptor
 		public FactoryBean<ChannelInterceptor> ciFactoryBean() {
-			return new AbstractFactoryBean<ChannelInterceptor>() {
+			return new AbstractFactoryBean<>() {
 
 				@Override
 				public Class<?> getObjectType() {
@@ -893,7 +894,7 @@ public class EnableIntegrationTests {
 				}
 
 				@Override
-				protected ChannelInterceptor createInstance() throws Exception {
+				protected ChannelInterceptor createInstance() {
 					return new ChannelInterceptor() {
 
 						@Override
@@ -937,7 +938,8 @@ public class EnableIntegrationTests {
 		}
 
 		@Bean
-		@BridgeTo("bridgeToOutput")
+		@BridgeTo(value = "bridgeToOutput", reactive = @Reactive)
+		@EndpointId("reactiveBridge")
 		public MessageChannel bridgeToInput() {
 			return new DirectChannel();
 		}
@@ -1043,7 +1045,7 @@ public class EnableIntegrationTests {
 	@EnableIntegration
 	@ImportResource("classpath:org/springframework/integration/configuration/EnableIntegrationTests-context.xml")
 	@EnableMessageHistory("${message.history.tracked.components}")
-	@EnablePublisher(defaultChannel = "publishedChannel")
+	@EnablePublisher(defaultChannel = "publishedChannel", proxyTargetClass = true, order = 2147483646)
 	@EnableAsync
 	public static class ContextConfiguration2 {
 
@@ -1066,7 +1068,7 @@ public class EnableIntegrationTests {
 
 		@Bean
 		public AtomicReference<Thread> asyncAnnotationProcessThread() {
-			return new AtomicReference<Thread>();
+			return new AtomicReference<>();
 		}
 
 		@Bean
@@ -1324,7 +1326,7 @@ public class EnableIntegrationTests {
 			assertThat(message.getHeaders().get("foo")).isEqualTo("FOO");
 			assertThat(message.getHeaders()).containsKey("calledMethod");
 			assertThat(message.getHeaders().get("calledMethod")).isEqualTo("echo");
-			return this.handle(message.getPayload()) + Arrays.asList(new Throwable().getStackTrace()).toString();
+			return handle(message.getPayload()) + Arrays.asList(new Throwable().getStackTrace()).toString();
 		}
 
 		@Transformer(inputChannel = "gatewayChannel2")
@@ -1334,7 +1336,7 @@ public class EnableIntegrationTests {
 			assertThat(message.getHeaders().get("foo")).isEqualTo("FOO");
 			assertThat(message.getHeaders()).containsKey("calledMethod");
 			assertThat(message.getHeaders().get("calledMethod")).isEqualTo("echo2");
-			return this.handle(message.getPayload()) + "2" + Arrays.asList(new Throwable().getStackTrace()).toString();
+			return handle(message.getPayload()) + "2" + Arrays.asList(new Throwable().getStackTrace()).toString();
 		}
 
 		@MyInboundChannelAdapter1
@@ -1430,6 +1432,14 @@ public class EnableIntegrationTests {
 		public boolean isRunning() {
 			return this.running;
 		}
+
+	}
+
+	@Conditional(TestCondition.class)
+	@MessagingGateway
+	public interface ConditionalGateway {
+
+		void testGateway(Object payload);
 
 	}
 
@@ -1691,6 +1701,15 @@ public class EnableIntegrationTests {
 
 		public static Object bar(Object o) {
 			return o;
+		}
+
+	}
+
+	public static class TestCondition implements Condition {
+
+		@Override
+		public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+			return context.getBeanFactory().containsBean("DoesNotExist");
 		}
 
 	}

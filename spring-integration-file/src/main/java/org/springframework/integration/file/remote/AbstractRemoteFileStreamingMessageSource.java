@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,8 @@ import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import org.springframework.context.Lifecycle;
 import org.springframework.expression.Expression;
 import org.springframework.expression.common.LiteralExpression;
 import org.springframework.integration.IntegrationMessageHeaderAccessor;
@@ -39,6 +39,7 @@ import org.springframework.integration.file.filters.ResettableFileListFilter;
 import org.springframework.integration.file.filters.ReversibleFileListFilter;
 import org.springframework.integration.file.remote.session.Session;
 import org.springframework.integration.file.support.FileUtils;
+import org.springframework.integration.support.management.ManageableLifecycle;
 import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.ObjectUtils;
@@ -55,7 +56,7 @@ import org.springframework.util.ObjectUtils;
  *
  */
 public abstract class AbstractRemoteFileStreamingMessageSource<F>
-		extends AbstractFetchLimitingMessageSource<InputStream> implements Lifecycle {
+		extends AbstractFetchLimitingMessageSource<InputStream> implements ManageableLifecycle {
 
 	private final RemoteFileTemplate<F> remoteFileTemplate;
 
@@ -64,6 +65,8 @@ public abstract class AbstractRemoteFileStreamingMessageSource<F>
 	private final Comparator<F> comparator;
 
 	private final AtomicBoolean running = new AtomicBoolean();
+
+	private final AtomicInteger fetched = new AtomicInteger();
 
 	private boolean fileInfoJson = true;
 
@@ -183,12 +186,11 @@ public abstract class AbstractRemoteFileStreamingMessageSource<F>
 
 	@Override
 	protected Object doReceive(int maxFetchSize) {
-		return doReceive();
-	}
-
-	@Override
-	protected Object doReceive() {
 		Assert.state(this.running.get(), () -> getComponentName() + " is not running");
+		if (maxFetchSize > 0 && this.fetched.get() >= maxFetchSize) {
+			this.toBeReceived.clear();
+			this.fetched.set(0);
+		}
 		AbstractFileInfo<F> file = poll();
 		while (file != null) {
 			if (this.filter != null && this.filter.supportsSingleFileFiltering()
@@ -202,30 +204,37 @@ public abstract class AbstractRemoteFileStreamingMessageSource<F>
 					break;
 				}
 			}
-			try {
-				String remotePath = remotePath(file);
-				Session<?> session = this.remoteFileTemplate.getSession();
-				try {
-					return getMessageBuilderFactory()
-							.withPayload(session.readRaw(remotePath))
-							.setHeader(IntegrationMessageHeaderAccessor.CLOSEABLE_RESOURCE, session)
-							.setHeader(FileHeaders.REMOTE_DIRECTORY, file.getRemoteDirectory())
-							.setHeader(FileHeaders.REMOTE_FILE, file.getFilename())
-							.setHeader(FileHeaders.REMOTE_HOST_PORT, session.getHostPort())
-							.setHeader(FileHeaders.REMOTE_FILE_INFO,
-									this.fileInfoJson ? file.toJson() : file);
-				}
-				catch (IOException e) {
-					session.close();
-					throw new UncheckedIOException("IOException when retrieving " + remotePath, e);
-				}
+			if (maxFetchSize > 0) {
+				this.fetched.incrementAndGet();
 			}
-			catch (RuntimeException e) {
-				resetFilterIfNecessary(file);
-				throw e;
-			}
+			return remoteFileToMessage(file);
 		}
 		return null;
+	}
+
+	private Object remoteFileToMessage(AbstractFileInfo<F> file) {
+		try {
+			String remotePath = remotePath(file);
+			Session<?> session = this.remoteFileTemplate.getSession();
+			try {
+				return getMessageBuilderFactory()
+						.withPayload(session.readRaw(remotePath))
+						.setHeader(IntegrationMessageHeaderAccessor.CLOSEABLE_RESOURCE, session)
+						.setHeader(FileHeaders.REMOTE_DIRECTORY, file.getRemoteDirectory())
+						.setHeader(FileHeaders.REMOTE_FILE, file.getFilename())
+						.setHeader(FileHeaders.REMOTE_HOST_PORT, session.getHostPort())
+						.setHeader(FileHeaders.REMOTE_FILE_INFO,
+								this.fileInfoJson ? file.toJson() : file);
+			}
+			catch (IOException e) {
+				session.close();
+				throw new UncheckedIOException("IOException when retrieving " + remotePath, e);
+			}
+		}
+		catch (RuntimeException e) {
+			resetFilterIfNecessary(file);
+			throw e;
+		}
 	}
 
 	protected AbstractFileInfo<F> poll() {

@@ -85,11 +85,12 @@ public class CrossOriginTests {
 		CorsConfiguration config = getCorsConfiguration(chain, false);
 		assertThat(config).isNotNull();
 		assertThat(config.getAllowedMethods().toArray()).isEqualTo(new String[] { "GET" });
-		assertThat(config.getAllowedOrigins().toArray()).isEqualTo(new String[] { "*" });
+		assertThat(config.getAllowedOrigins()).isNull();
+		assertThat(config.getAllowedOriginPatterns().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getAllowCredentials()).isTrue();
 		assertThat(config.getAllowedHeaders().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getExposedHeaders()).isEmpty();
-		assertThat(config.getMaxAge()).isEqualTo(new Long(1800));
+		assertThat(config.getMaxAge()).isEqualTo(1800L);
 	}
 
 	@Test
@@ -103,7 +104,7 @@ public class CrossOriginTests {
 				.isEqualTo(new String[] { "https://site1.com", "https://site2.com" });
 		assertThat(config.getAllowedHeaders().toArray()).isEqualTo(new String[] { "header1", "header2" });
 		assertThat(config.getExposedHeaders().toArray()).isEqualTo(new String[] { "header3", "header4" });
-		assertThat(config.getMaxAge()).isEqualTo(new Long(123));
+		assertThat(config.getMaxAge()).isEqualTo(123L);
 		assertThat(config.getAllowCredentials()).isEqualTo(false);
 	}
 
@@ -116,11 +117,12 @@ public class CrossOriginTests {
 		CorsConfiguration config = getCorsConfiguration(chain, true);
 		assertThat(config).isNotNull();
 		assertThat(config.getAllowedMethods().toArray()).isEqualTo(new String[] { "GET" });
-		assertThat(config.getAllowedOrigins().toArray()).isEqualTo(new String[] { "*" });
+		assertThat(config.getAllowedOrigins()).isNull();
+		assertThat(config.getAllowedOriginPatterns().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getAllowCredentials()).isTrue();
 		assertThat(config.getAllowedHeaders().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getExposedHeaders()).isEmpty();
-		assertThat(config.getMaxAge()).isEqualTo(new Long(1800));
+		assertThat(config.getMaxAge()).isEqualTo(1800L);
 	}
 
 	@Test
@@ -133,7 +135,8 @@ public class CrossOriginTests {
 		CorsConfiguration config = getCorsConfiguration(chain, true);
 		assertThat(config).isNotNull();
 		assertThat(config.getAllowedMethods().toArray()).isEqualTo(new String[] { "*" });
-		assertThat(config.getAllowedOrigins().toArray()).isEqualTo(new String[] { "*" });
+		assertThat(config.getAllowedOrigins()).isNull();
+		assertThat(config.getAllowedOriginPatterns().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getAllowedHeaders().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getAllowCredentials()).isTrue();
 		assertThat(config.getExposedHeaders()).isNull();
@@ -149,7 +152,8 @@ public class CrossOriginTests {
 		CorsConfiguration config = getCorsConfiguration(chain, true);
 		assertThat(config).isNotNull();
 		assertThat(config.getAllowedMethods().toArray()).isEqualTo(new String[] { "*" });
-		assertThat(config.getAllowedOrigins().toArray()).isEqualTo(new String[] { "*" });
+		assertThat(config.getAllowedOrigins()).isNull();
+		assertThat(config.getAllowedOriginPatterns().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getAllowedHeaders().toArray()).isEqualTo(new String[] { "*" });
 		assertThat(config.getAllowCredentials()).isTrue();
 		assertThat(config.getExposedHeaders()).isNull();

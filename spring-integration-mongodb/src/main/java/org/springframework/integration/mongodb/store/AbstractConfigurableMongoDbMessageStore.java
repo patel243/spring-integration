@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -150,13 +150,15 @@ public abstract class AbstractConfigurableMongoDbMessageStore extends AbstractMe
 
 		indexOperations.ensureIndex(new Index(MessageDocumentFields.MESSAGE_ID, Sort.Direction.ASC));
 
-		indexOperations.ensureIndex(new Index(MessageDocumentFields.GROUP_ID, Sort.Direction.ASC)
-				.on(MessageDocumentFields.MESSAGE_ID, Sort.Direction.ASC)
-				.unique());
+		indexOperations.ensureIndex(
+				new Index(MessageDocumentFields.GROUP_ID, Sort.Direction.ASC)
+						.on(MessageDocumentFields.MESSAGE_ID, Sort.Direction.ASC)
+						.unique());
 
-		indexOperations.ensureIndex(new Index(MessageDocumentFields.GROUP_ID, Sort.Direction.ASC)
-				.on(MessageDocumentFields.LAST_MODIFIED_TIME, Sort.Direction.DESC)
-				.on(MessageDocumentFields.SEQUENCE, Sort.Direction.DESC));
+		indexOperations.ensureIndex(
+				new Index(MessageDocumentFields.GROUP_ID, Sort.Direction.ASC)
+						.on(MessageDocumentFields.LAST_MODIFIED_TIME, Sort.Direction.DESC)
+						.on(MessageDocumentFields.SEQUENCE, Sort.Direction.DESC));
 	}
 
 	public Message<?> getMessage(UUID id) {
@@ -198,14 +200,15 @@ public abstract class AbstractConfigurableMongoDbMessageStore extends AbstractMe
 	 * The {@link #SEQUENCE_NAME} document is created on demand.
 	 * @return the next sequence value.
 	 */
-	protected int getNextId() {
+	protected long getNextId() {
 		Query query = Query.query(Criteria.where("_id").is(SEQUENCE_NAME));
 		query.fields().include(MessageDocumentFields.SEQUENCE);
-		return (Integer) this.mongoTemplate.findAndModify(query,
-				new Update().inc(MessageDocumentFields.SEQUENCE, 1),
+		return ((Number) this.mongoTemplate.findAndModify(query,
+				new Update().inc(MessageDocumentFields.SEQUENCE, 1L),
 				FindAndModifyOptions.options().returnNew(true).upsert(true),
 				Map.class, this.collectionName)
-				.get(MessageDocumentFields.SEQUENCE); // NOSONAR - never returns null
+				.get(MessageDocumentFields.SEQUENCE))  // NOSONAR - never returns null
+				.longValue();
 	}
 
 	protected void addMessageDocument(final MessageDocument document) {
@@ -230,6 +233,11 @@ public abstract class AbstractConfigurableMongoDbMessageStore extends AbstractMe
 
 	@Override
 	public void removeMessagesFromGroup(Object key, Collection<Message<?>> messages) {
+		throw NOT_IMPLEMENTED;
+	}
+
+	@Override
+	public void setGroupCondition(Object groupId, String condition) {
 		throw NOT_IMPLEMENTED;
 	}
 

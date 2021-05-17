@@ -34,9 +34,12 @@ This documentation is also available as single searchable link:index-single.html
 <<./jdbc.adoc#jdbc,JDBC Support>> ::
 <<./jpa.adoc#jpa,JPA Support>> ::
 <<./jms.adoc#jms,JMS Support>> ::
+<<./jmx.adoc#jmx,JMX Support>> ::
+<<./kafka.adoc#kafka,Apache Kafka Support>> ::
 <<./mail.adoc#mail,Mail Support>> ::
 <<./mongodb.adoc#mongodb,MongoDb Support>> ::
 <<./mqtt.adoc#mqtt,MQTT Support>> ::
+<<./r2dbc.adoc#r2dbc,R2DBC Support>> ::
 <<./redis.adoc#redis,Redis Support>> ::
 <<./resource.adoc#resource,Resource Support>> ::
 <<./rmi.adoc#rmi,RMI Support>> ::
@@ -51,6 +54,7 @@ This documentation is also available as single searchable link:index-single.html
 <<./ws.adoc#ws,Web Services Support>> ::
 <<./xml.adoc#xml,XML Support - Dealing with XML Payloads>> ::
 <<./xmpp.adoc#xmpp,XMPP Support>> ::
+<<./zeromq.adoc#zeromq,ZeroMQ Support>> ::
 <<./zookeeper.adoc#zookeeper,Zookeeper Support>> ::
 
 [horizontal]

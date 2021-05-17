@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2015-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,23 @@
 
 package org.springframework.integration.channel;
 
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 
 import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageDeliveryException;
 import org.springframework.util.Assert;
 
 import reactor.core.Disposable;
 import reactor.core.Disposables;
-import reactor.core.publisher.EmitterProcessor;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.FluxSink;
-import reactor.core.publisher.ReplayProcessor;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 /**
@@ -43,47 +48,85 @@ import reactor.core.scheduler.Schedulers;
 public class FluxMessageChannel extends AbstractMessageChannel
 		implements Publisher<Message<?>>, ReactiveStreamsSubscribableChannel {
 
-	private final EmitterProcessor<Message<?>> processor;
+	private final Scheduler scheduler = Schedulers.boundedElastic();
 
-	private final FluxSink<Message<?>> sink;
+	private final Sinks.Many<Message<?>> sink = Sinks.many().multicast().onBackpressureBuffer(1, false);
 
-	private final ReplayProcessor<Boolean> subscribedSignal = ReplayProcessor.create(1);
+	private final Sinks.Many<Boolean> subscribedSignal = Sinks.many().replay().limit(1);
 
 	private final Disposable.Composite upstreamSubscriptions = Disposables.composite();
 
-	public FluxMessageChannel() {
-		this.processor = EmitterProcessor.create(1, false);
-		this.sink = this.processor.sink(FluxSink.OverflowStrategy.BUFFER);
-	}
+	private volatile boolean active = true;
 
 	@Override
 	protected boolean doSend(Message<?> message, long timeout) {
-		Assert.state(this.processor.hasDownstreams(),
+		Assert.state(this.active && this.sink.currentSubscriberCount() > 0,
 				() -> "The [" + this + "] doesn't have subscribers to accept messages");
-		this.sink.next(message);
+		long remainingTime = 0;
+		if (timeout > 0) {
+			remainingTime = timeout;
+		}
+		long parkTimeout = 10; // NOSONAR
+		long parkTimeoutNs = TimeUnit.MILLISECONDS.toNanos(parkTimeout);
+		while (this.active && !tryEmitMessage(message)) {
+			remainingTime -= parkTimeout;
+			if (timeout >= 0 && remainingTime <= 0) {
+				return false;
+			}
+			LockSupport.parkNanos(parkTimeoutNs);
+		}
 		return true;
+	}
+
+	private boolean tryEmitMessage(Message<?> message) {
+		switch (this.sink.tryEmitNext(message)) {
+			case OK:
+				return true;
+			case FAIL_NON_SERIALIZED:
+			case FAIL_OVERFLOW:
+				return false;
+			case FAIL_ZERO_SUBSCRIBER:
+				throw new IllegalStateException("The [" + this + "] doesn't have subscribers to accept messages");
+			case FAIL_TERMINATED:
+			case FAIL_CANCELLED:
+				throw new IllegalStateException("Cannot emit messages into the cancelled or terminated sink: "
+						+ this.sink);
+			default:
+				throw new UnsupportedOperationException();
+		}
 	}
 
 	@Override
 	public void subscribe(Subscriber<? super Message<?>> subscriber) {
-		this.processor
-				.doFinally((s) -> this.subscribedSignal.onNext(this.processor.hasDownstreams()))
+		this.sink.asFlux()
+				.doFinally((s) -> this.subscribedSignal.tryEmitNext(this.sink.currentSubscriberCount() > 0))
+				.share()
 				.subscribe(subscriber);
-		this.subscribedSignal.onNext(this.processor.hasDownstreams());
+
+		this.upstreamSubscriptions.add(
+				Mono.fromCallable(() -> this.sink.currentSubscriberCount() > 0)
+						.filter(Boolean::booleanValue)
+						.doOnNext(this.subscribedSignal::tryEmitNext)
+						.repeatWhenEmpty((repeat) ->
+								this.active ? repeat.delayElements(Duration.ofMillis(100)) : repeat) // NOSONAR
+						.subscribe());
 	}
 
 	@Override
 	public void subscribeTo(Publisher<? extends Message<?>> publisher) {
 		this.upstreamSubscriptions.add(
 				Flux.from(publisher)
-						.delaySubscription(this.subscribedSignal.filter(Boolean::booleanValue).next())
-						.publishOn(Schedulers.boundedElastic())
+						.delaySubscription(this.subscribedSignal.asFlux().filter(Boolean::booleanValue).next())
+						.publishOn(this.scheduler)
 						.doOnNext((message) -> {
 							try {
-								send(message);
+								if (!send(message)) {
+									throw new MessageDeliveryException(message,
+											"Failed to send message to channel '" + this);
+								}
 							}
 							catch (Exception ex) {
-								logger.warn("Error during processing event: " + message, ex);
+								logger.warn(ex, () -> "Error during processing event: " + message);
 							}
 						})
 						.subscribe());
@@ -91,9 +134,11 @@ public class FluxMessageChannel extends AbstractMessageChannel
 
 	@Override
 	public void destroy() {
-		this.subscribedSignal.onNext(false);
+		this.active = false;
 		this.upstreamSubscriptions.dispose();
-		this.processor.onComplete();
+		this.subscribedSignal.emitComplete(Sinks.EmitFailureHandler.FAIL_FAST);
+		this.sink.emitComplete(Sinks.EmitFailureHandler.FAIL_FAST);
+		this.scheduler.dispose();
 		super.destroy();
 	}
 

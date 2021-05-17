@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,8 @@ import org.springframework.amqp.rabbit.batch.SimpleBatchingStrategy;
 import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareBatchMessageListener;
 import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
+import org.springframework.amqp.rabbit.retry.MessageBatchRecoverer;
+import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.support.converter.MessageConverter;
@@ -43,6 +45,7 @@ import org.springframework.integration.amqp.support.EndpointUtils;
 import org.springframework.integration.context.OrderlyShutdownCapable;
 import org.springframework.integration.endpoint.MessageProducerSupport;
 import org.springframework.integration.support.ErrorMessageUtils;
+import org.springframework.lang.Nullable;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.retry.RecoveryCallback;
 import org.springframework.retry.RetryOperations;
@@ -66,6 +69,12 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 		OrderlyShutdownCapable {
 
 	/**
+	 * Header containing {@code List<Map<String, Object>} headers when batch mode
+	 * is {@link BatchMode#EXTRACT_PAYLOADS_WITH_HEADERS}.
+	 */
+	public static final String CONSOLIDATED_HEADERS = AmqpHeaders.PREFIX + "batchedHeaders";
+
+	/**
 	 * Defines the payload type when the listener container is configured with consumerBatchEnabled.
 	 */
 	public enum BatchMode {
@@ -80,7 +89,14 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 		 * Payload is a {@code List<?>} where each element is the converted body of the
 		 * Spring AMQP Message.
 		 */
-		EXTRACT_PAYLOADS
+		EXTRACT_PAYLOADS,
+
+		/**
+		 * Payload is a {@code List<?>} where each element is the converted body of the
+		 * Spring AMQP Message. The headers for each message are provided in a header
+		 * {@link AmqpInboundChannelAdapter#CONSOLIDATED_HEADERS}.
+		 */
+		EXTRACT_PAYLOADS_WITH_HEADERS
 
 	}
 
@@ -95,6 +111,8 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 	private RetryTemplate retryTemplate;
 
 	private RecoveryCallback<?> recoveryCallback;
+
+	private MessageRecoverer messageRecoverer;
 
 	private BatchingStrategy batchingStrategy = new SimpleBatchingStrategy(0, 0, 0L);
 
@@ -140,12 +158,23 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 
 	/**
 	 * Set a {@link RecoveryCallback} when using retry within the adapter.
+	 * Mutually exclusive with {@link #setMessageRecoverer(MessageRecoverer)}.
 	 * @param recoveryCallback the callback.
 	 * @since 4.3.10
 	 * @see #setRetryTemplate(RetryTemplate)
 	 */
 	public void setRecoveryCallback(RecoveryCallback<?> recoveryCallback) {
 		this.recoveryCallback = recoveryCallback;
+	}
+
+	/**
+	 * Configure a {@link MessageRecoverer} for retry operations.
+	 * A more AMQP-specific convenience instead of {@link #setRecoveryCallback(RecoveryCallback)}.
+	 * @param messageRecoverer the {@link MessageRecoverer} to use.
+	 * @since 5.5
+	 */
+	public void setMessageRecoverer(MessageRecoverer messageRecoverer) {
+		this.messageRecoverer = messageRecoverer;
 	}
 
 	/**
@@ -192,6 +221,7 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 			Assert.state(getErrorChannel() == null, "Cannot have an 'errorChannel' property when a 'RetryTemplate' is "
 					+ "provided; use an 'ErrorMessageSendingRecoverer' in the 'recoveryCallback' property to "
 					+ "send an error message when retries are exhausted");
+			setupRecoveryCallbackIfAny();
 		}
 		Listener messageListener;
 		if (this.messageListenerContainer.isConsumerBatchEnabled()) {
@@ -203,6 +233,38 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 		this.messageListenerContainer.setMessageListener(messageListener);
 		this.messageListenerContainer.afterPropertiesSet();
 		super.onInit();
+	}
+
+	private void setupRecoveryCallbackIfAny() {
+		Assert.state(this.recoveryCallback == null || this.messageRecoverer == null,
+				"Only one of 'recoveryCallback' or 'messageRecoverer' may be provided, but not both");
+		if (this.messageRecoverer != null) {
+			if (this.messageListenerContainer.isConsumerBatchEnabled()) {
+				Assert.isInstanceOf(MessageBatchRecoverer.class, this.messageRecoverer,
+						"The 'messageRecoverer' must be an instance of MessageBatchRecoverer " +
+								"when consumer configured for batch mode");
+				this.recoveryCallback =
+						context -> {
+							@SuppressWarnings("unchecked")
+							List<Message> messagesToRecover =
+									(List<Message>) RetrySynchronizationManager.getContext()
+											.getAttribute(AmqpMessageHeaderErrorMessageStrategy.AMQP_RAW_MESSAGE);
+							((MessageBatchRecoverer) this.messageRecoverer).recover(messagesToRecover,
+									context.getLastThrowable());
+							return null;
+						};
+			}
+			else {
+				this.recoveryCallback =
+						context -> {
+							Message messageToRecover =
+									(Message) RetrySynchronizationManager.getContext()
+											.getAttribute(AmqpMessageHeaderErrorMessageStrategy.AMQP_RAW_MESSAGE);
+							this.messageRecoverer.recover(messageToRecover, context.getLastThrowable());
+							return null;
+						};
+			}
+		}
 	}
 
 	@Override
@@ -332,7 +394,7 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 				headers.put(IntegrationMessageHeaderAccessor.SOURCE_DATA, message);
 			}
 			long deliveryTag = message.getMessageProperties().getDeliveryTag();
-			return createMessageFromPayload(payload, channel, headers, deliveryTag);
+			return createMessageFromPayload(payload, channel, headers, deliveryTag, null);
 		}
 
 		protected Object convertPayload(Message message) {
@@ -350,7 +412,8 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 		}
 
 		protected org.springframework.messaging.Message<Object> createMessageFromPayload(Object payload,
-				Channel channel, Map<String, Object> headers, long deliveryTag) {
+				Channel channel, Map<String, Object> headers, long deliveryTag,
+				@Nullable List<Map<String, Object>> listHeaders) {
 
 			if (this.manualAcks) {
 				headers.put(AmqpHeaders.DELIVERY_TAG, deliveryTag);
@@ -358,6 +421,9 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 			}
 			if (AmqpInboundChannelAdapter.this.retryTemplate != null) {
 				headers.put(IntegrationMessageHeaderAccessor.DELIVERY_ATTEMPT, new AtomicInteger());
+			}
+			if (listHeaders != null) {
+				headers.put(CONSOLIDATED_HEADERS, listHeaders);
 			}
 			return getMessageBuilderFactory()
 					.withPayload(payload)
@@ -374,16 +440,23 @@ public class AmqpInboundChannelAdapter extends MessageProducerSupport implements
 		@Override
 		public void onMessageBatch(List<Message> messages, Channel channel) {
 			List<?> converted;
+			List<Map<String, Object>> headers = null;
 			if (this.batchModeMessages) {
 				converted = convertMessages(messages, channel);
 			}
 			else {
 				converted = convertPayloads(messages, channel);
+				if (BatchMode.EXTRACT_PAYLOADS_WITH_HEADERS.equals(AmqpInboundChannelAdapter.this.batchMode)) {
+					List<Map<String, Object>> listHeaders = new ArrayList<>();
+					messages.forEach(msg -> listHeaders.add(AmqpInboundChannelAdapter.this.headerMapper
+							.toHeadersFromRequest(msg.getMessageProperties())));
+					headers = listHeaders;
+				}
 			}
 			if (converted != null) {
 				org.springframework.messaging.Message<?> message =
 						createMessageFromPayload(converted, channel, new HashMap<>(),
-								messages.get(messages.size() - 1).getMessageProperties().getDeliveryTag());
+								messages.get(messages.size() - 1).getMessageProperties().getDeliveryTag(), headers);
 				try {
 					if (this.retryOps == null) {
 						setAttributesIfNecessary(messages, message);

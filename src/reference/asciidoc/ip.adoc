@@ -72,6 +72,7 @@ The following example configures a UDP outbound channel adapter:
     host="somehost"
     port="11111"
     multicast="false"
+    socket-customizer="udpCustomizer"
     channel="exampleChannel"/>
 ----
 ====
@@ -88,7 +89,9 @@ The `length` header provides a mechanism to detect this.
 Starting with version 4.3, you can set the `port` to `0`, in which case the operating system chooses the port.
 The chosen port can be discovered by invoking `getPort()` after the adapter is started and `isListening()` returns `true`.
 
-The preceding example shows an outbound channel adapter that adds length checking to the datagram packets:
+Starting with version 5.3.3, you can add a `SocketCustomizer` bean to modify the `DatagramSocket` after it is created (for example, call `setTrafficClass(0x10)`).
+
+The following example shows an outbound channel adapter that adds length checking to the datagram packets:
 
 ====
 [source,xml]
@@ -143,7 +146,7 @@ The following example shows how to configure an outbound UDP adapter with Java:
 @Bean
 @ServiceActivator(inputChannel = "udpOut")
 public UnicastSendingMessageHandler handler() {
-	return new UnicastSendingMessageHandler("localhost", 11111);
+    return new UnicastSendingMessageHandler("localhost", 11111);
 }
 ----
 ====
@@ -159,9 +162,9 @@ The following example shows how to configure an outbound UDP adapter with the Ja
 ----
 @Bean
 public IntegrationFlow udpOutFlow() {
-	return IntegrationFlows.from("udpOut")
-			.handle(Udp.outboundAdapter("localhost", 1234))
-			.get();
+    return f -> f.handle(Udp.outboundAdapter("localhost", 1234)
+                    .configureSocket(socket -> socket.setTrafficClass(0x10)))
+                .get();
 }
 ----
 ====
@@ -178,6 +181,7 @@ The following example shows how to configure a basic unicast inbound udp channel
     port="11111"
     receive-buffer-size="500"
     multicast="false"
+    socket-customizer="udpCustomizer"
     check-length="true"/>
 ----
 ====
@@ -201,6 +205,9 @@ By default, reverse DNS lookups are done on inbound packets to convert IP addres
 In environments where DNS is not configured, this can cause delays.
 You can override this default behavior by setting the `lookup-host` attribute to `false`.
 
+Starting with version 5.3.3, you can add a `SocketCustomizer` bean to modify the `DatagramSocket` after it is created.
+It is called for the receiving socket and any sockets created for sending acks.
+
 ==== Inbound UDP Adapters (Java Configuration)
 
 The following example shows how to configure an inbound UDP adapter with Java:
@@ -209,9 +216,9 @@ The following example shows how to configure an inbound UDP adapter with Java:
 ----
 @Bean
 public UnicastReceivingChannelAdapter udpIn() {
-	UnicastReceivingChannelAdapter adapter = new UnicastReceivingChannelAdapter(11111);
-	adapter.setOutputChannelName("udpChannel");
-	return adapter;
+    UnicastReceivingChannelAdapter adapter = new UnicastReceivingChannelAdapter(11111);
+    adapter.setOutputChannelName("udpChannel");
+    return adapter;
 }
 ----
 
@@ -223,9 +230,9 @@ The following example shows how to configure an inbound UDP adapter with the Jav
 ----
 @Bean
 public IntegrationFlow udpIn() {
-	return IntegrationFlows.from(Udp.inboundAdapter(11111))
-			.channel("udpChannel")
-			.get();
+    return IntegrationFlows.from(Udp.inboundAdapter(11111))
+            .channel("udpChannel")
+            .get();
 }
 ----
 
@@ -278,11 +285,11 @@ The following example shows the equivalent configuration with the Java DSL:
 ----
 @Bean
 public IntegrationFlow udpEchoUpcaseServer() {
-	return IntegrationFlows.from(Udp.inboundAdapter(11111).id("udpIn"))
-			.<byte[], String>transform(p -> new String(p).toUpperCase())
-			.handle(Udp.outboundAdapter("headers['ip_packetAddress']")
-					.socketExpression("@udpIn.socket"))
-			.get();
+    return IntegrationFlows.from(Udp.inboundAdapter(11111).id("udpIn"))
+            .<byte[], String>transform(p -> new String(p).toUpperCase())
+            .handle(Udp.outboundAdapter("headers['ip_packetAddress']")
+                    .socketExpression("@udpIn.socket"))
+            .get();
 }
 ----
 ====
@@ -373,6 +380,8 @@ The following example shows a client connection factory that uses `java.net.Sock
 ====
 
 Starting with version 5.2, the client connection factories support the property `connectTimeout`, specified in seconds, which defaults to 60.
+
+Also see <<ip-annotation>> and <<ip-dsl>>.
 
 [[tcp-codecs]]
 ==== Message Demarcation (Serializers and Deserializers)
@@ -488,6 +497,8 @@ You can override this default behavior by setting the `lookup-host` attribute to
 NOTE: You can also modify the attributes of sockets and socket factories.
 See <<ssl-tls>> for more information.
 As noted there, such modifications are possible whether or not SSL is being used.
+
+Also see <<ip-annotation>> and <<ip-dsl>>.
 
 ==== Custom Serializers and Deserializers
 
@@ -657,7 +668,7 @@ clientFactory.setConnectionTest(conn -> {
 
 You can configure connection factories with a reference to a `TcpConnectionInterceptorFactoryChain`.
 You can use interceptors to add behavior to connections, such as negotiation, security, and other options.
-No interceptors are currently provided by the framework, but see https://github.com/spring-projects/spring-integration/blob/master/spring-integration-ip/src/test/java/org/springframework/integration/ip/tcp/InterceptedSharedConnectionTests.java[`InterceptedSharedConnectionTests` in the source repository] for an example.
+No interceptors are currently provided by the framework, but see https://github.com/spring-projects/spring-integration/blob/main/spring-integration-ip/src/test/java/org/springframework/integration/ip/tcp/InterceptedSharedConnectionTests.java[`InterceptedSharedConnectionTests` in the source repository] for an example.
 
 The `HelloWorldInterceptor` used in the test case works as follows:
 
@@ -808,6 +819,8 @@ The following example shows how to define client and server TCP connection facto
 ----
 ====
 
+Also see <<ip-annotation>> and <<ip-dsl>>.
+
 In the preceding configuration, messages arriving in the `input` channel are serialized over connections created by `client` connection factory, received at the server, and placed on the `loop` channel.
 Since `loop` is the input channel for `outboundServer`, the message is looped back over the same connection, received by `inboundClient`, and deposited in the `replies` channel.
 Java serialization is used on the wire.
@@ -910,6 +923,14 @@ This only applies when using the `TcpNetClientConnectionFactory`, it is ignored 
 IMPORTANT: When using a shared connection (`singleUse=false`), a new request, while another is in process, will be blocked until the current reply is received.
 Consider using the `CachingClientConnectionFactory` if you wish to support concurrent requests on a pool of long-lived connections.
 
+Starting with version 5.4, the inbound can be configured with an `unsolicitedMessageChannel`.
+Unsolicited inbound messages will be sent to this channel, as well as late replies (where the client timed out).
+To support this on the server side, you can now register multiple `TcpSender` s with the connection factory.
+Gateways and Channel Adapters automatically register themselves.
+When sending unsolicited messages from the server, you must add the appropriate `IpHeaders.CONNECTION_ID` to the messages sent.
+
+Also see <<ip-annotation>> and <<ip-dsl>>.
+
 [[ip-correlation]]
 === TCP Message Correlation
 
@@ -970,6 +991,10 @@ This meant that, if no data were received by the inbound adapter for this period
 This default behavior was not appropriate in a truly asynchronous environment, so it now defaults to an infinite timeout.
 You can reinstate the previous default behavior by setting the `so-timeout` attribute on the client connection factory to 10000 milliseconds.
 =====
+
+Starting with version 5.4, multiple outbound channel adapters and one `TcpInboundChannelAdapter` can share the same connection factory.
+This allows an application to support both request/reply and arbitrary server -> client messaging.
+See <<tcp-gateways>> for more information.
 
 [[ip-headers]]
 ==== Transferring Headers
@@ -1249,7 +1274,7 @@ By default, the files are located on the classpath, but you can override this by
 
 Starting with version 4.3.6, when you use NIO, you can specify an `ssl-handshake-timeout` (in seconds) on the connection factory.
 This timeout (the default is 30 seconds) is used during SSL handshake when waiting for data.
-If the timeout is exceeded, the process is aborted and the socket is closed.
+If the timeout is exceeded, the process is stopped and the socket is closed.
 
 [[tcp-ssl-host-verification]]
 ==== Host Verification
@@ -1386,10 +1411,10 @@ The following listing shows the definition of the `TcpNetConnectionSupport` stra
 ----
 public interface TcpNetConnectionSupport {
 
-	TcpNetConnection createNewConnection(Socket socket,
-			boolean server, boolean lookupHost,
-			ApplicationEventPublisher applicationEventPublisher,
-			String connectionFactoryName) throws Exception;
+    TcpNetConnection createNewConnection(Socket socket,
+            boolean server, boolean lookupHost,
+            ApplicationEventPublisher applicationEventPublisher,
+            String connectionFactoryName) throws Exception;
 
 }
 ----
@@ -2054,6 +2079,11 @@ Only applies if the reply-channel might block (such as a bounded QueueChannel th
 | `async`
 |
 | Release the sending thread after the send; the reply (or error) will be sent on the receiving thread.
+
+| `unsolicited`
+`MessageChannel`
+|
+| A channel to which to send unsolicited messages and late replies.
 |===
 
 .IP Message Headers
@@ -2224,4 +2254,74 @@ In this scenario, the `@ServiceActivator` configures the endpoint, according to 
 <7> The client-side connection factory.
 
 <8> The server-side connection factory.
+====
+
+[[ip-dsl]]
+=== Using the Java DSL for TCP Components
+
+DSL support for TCP components includes specs for adapters and gateways, the `Tcp` class with factory methods to create connection factory beans, and the `TcpCodecs` class with factory methods to create serializers and deserializers.
+Refer to their javadocs for more information.
+
+Here are some examples of using the DSL to configure flows using the DSL.
+
+.Server Adapter Flow
+====
+[source, java]
+----
+@Bean
+public IntegrationFlow server() {
+    return IntegrationFlows.from(Tcp.inboundAdapter(Tcp.netServer(1234)
+                            .deserializer(TcpCodecs.lengthHeader1())
+                            .backlog(30))
+                        .errorChannel("tcpIn.errorChannel")
+                        .id("tcpIn"))
+            .transform(Transformers.objectToString())
+            .channel("tcpInbound")
+            .get();
+}
+----
+====
+
+.Client Adapter Flow
+====
+[source, java]
+----
+@Bean
+public IntegrationFlow client() {
+    return f -> f.handle(Tcp.outboundAdapter(Tcp.nioClient("localhost", 1234)
+                        .serializer(TcpCodecs.lengthHeader1())));
+}
+----
+====
+
+.Server Gateway Flow
+====
+[source, java]
+----
+@Bean
+public IntegrationFlow server() {
+    return IntegrationFlows.from(Tcp.inboundGateway(Tcp.netServer(1234)
+                            .deserializer(TcpCodecs.lengthHeader1())
+                            .serializer(TcpCodecs.lengthHeader1())
+                            .backlog(30))
+                        .errorChannel("tcpIn.errorChannel")
+                        .id("tcpIn"))
+            .transform(Transformers.objectToString())
+            .channel("tcpInbound")
+            .get();
+}
+----
+====
+
+.Client Gateway Flow
+====
+[source, java]
+----
+@Bean
+public IntegrationFlow client() {
+    return f -> f.handle(Tcp.outboundGateway(Tcp.nioClient("localhost", 1234)
+                        .deserializer(TcpCodecs.lengthHeader1())
+                        .serializer(TcpCodecs.lengthHeader1())));
+}
+----
 ====

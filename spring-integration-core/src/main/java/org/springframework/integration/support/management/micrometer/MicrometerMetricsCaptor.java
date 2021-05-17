@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 the original author or authors.
+ * Copyright 2018-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.ToDoubleFunction;
 
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.integration.support.management.metrics.CounterFacade;
@@ -49,31 +50,44 @@ public class MicrometerMetricsCaptor implements MetricsCaptor {
 
 	public static final String MICROMETER_CAPTOR_NAME = "integrationMicrometerMetricsCaptor";
 
-	protected final MeterRegistry meterRegistry; // NOSONAR
+	private MeterRegistry meterRegistry;
+
+	private ObjectProvider<MeterRegistry> meterRegistryProvider;
 
 	public MicrometerMetricsCaptor(MeterRegistry meterRegistry) {
 		Assert.notNull(meterRegistry, "meterRegistry cannot be null");
 		this.meterRegistry = meterRegistry;
 	}
 
+	MicrometerMetricsCaptor(ObjectProvider<MeterRegistry> meterRegistryProvider) {
+		this.meterRegistryProvider = meterRegistryProvider;
+	}
+
+	public MeterRegistry getMeterRegistry() {
+		if (this.meterRegistry == null) {
+			this.meterRegistry = this.meterRegistryProvider.getIfUnique();
+		}
+		return this.meterRegistry;
+	}
+
 	@Override
 	public TimerBuilder timerBuilder(String name) {
-		return new MicroTimerBuilder(this.meterRegistry, name);
+		return new MicroTimerBuilder(getMeterRegistry(), name);
 	}
 
 	@Override
 	public CounterBuilder counterBuilder(String name) {
-		return new MicroCounterBuilder(this.meterRegistry, name);
+		return new MicroCounterBuilder(getMeterRegistry(), name);
 	}
 
 	@Override
 	public GaugeBuilder gaugeBuilder(String name, Object obj, ToDoubleFunction<Object> f) {
-		return new MicroGaugeBuilder(this.meterRegistry, name, obj, f);
+		return new MicroGaugeBuilder(getMeterRegistry(), name, obj, f);
 	}
 
 	@Override
 	public SampleFacade start() {
-		return new MicroSample(Timer.start(this.meterRegistry));
+		return new MicroSample(Timer.start(getMeterRegistry()));
 	}
 
 	@Override
@@ -86,7 +100,10 @@ public class MicrometerMetricsCaptor implements MetricsCaptor {
 	 * there's already a {@link MetricsCaptor} bean, return that.
 	 * @param applicationContext the application context.
 	 * @return the instance.
+	 * @deprecated since 5.2.9 in favor of {@code @Import(MicrometerMetricsCaptorRegistrar.class)};
+	 * will be removed in 6.0.
 	 */
+	@Deprecated
 	public static MetricsCaptor loadCaptor(ApplicationContext applicationContext) {
 		try {
 			MeterRegistry registry = applicationContext.getBean(MeterRegistry.class);

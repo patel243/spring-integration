@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,6 +47,7 @@ import org.springframework.integration.file.filters.DiscardAwareFileListFilter;
 import org.springframework.integration.file.filters.FileListFilter;
 import org.springframework.integration.file.filters.ResettableFileListFilter;
 import org.springframework.integration.support.AbstractIntegrationMessageBuilder;
+import org.springframework.integration.support.management.ManageableLifecycle;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.util.Assert;
@@ -90,8 +91,7 @@ import org.springframework.util.Assert;
  * @author Artem Bilan
  * @author Steven Pearce
  */
-public class FileReadingMessageSource extends AbstractMessageSource<File>
-		implements Lifecycle {
+public class FileReadingMessageSource extends AbstractMessageSource<File> implements ManageableLifecycle {
 
 	private static final int DEFAULT_INTERNAL_QUEUE_CAPACITY = 5;
 
@@ -123,14 +123,14 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 	private WatchEventType[] watchEvents = { WatchEventType.CREATE };
 
 	/**
-	 * Creates a FileReadingMessageSource with a naturally ordered queue of unbounded capacity.
+	 * Create a FileReadingMessageSource with a naturally ordered queue of unbounded capacity.
 	 */
 	public FileReadingMessageSource() {
 		this(null);
 	}
 
 	/**
-	 * Creates a FileReadingMessageSource with a bounded queue of the given
+	 * Create a FileReadingMessageSource with a bounded queue of the given
 	 * capacity. This can be used to reduce the memory footprint of this
 	 * component when reading from a large directory.
 	 * @param internalQueueCapacity
@@ -144,21 +144,18 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 	 */
 	public FileReadingMessageSource(int internalQueueCapacity) {
 		this(null);
-		Assert.isTrue(internalQueueCapacity > 0,
-				"Cannot create a queue with non positive capacity");
+		Assert.isTrue(internalQueueCapacity > 0, "Cannot create a queue with non positive capacity");
 		this.scanner = new HeadDirectoryScanner(internalQueueCapacity);
 	}
 
 	/**
-	 * Creates a FileReadingMessageSource with a {@link PriorityBlockingQueue}
+	 * Create a FileReadingMessageSource with a {@link PriorityBlockingQueue}
 	 * ordered with the passed in {@link Comparator}.
 	 * <p> The size of the queue used should be large enough to hold all the files
 	 * in the input directory in order to sort all of them, so restricting the
 	 * size of the queue is mutually exclusive with ordering. No guarantees
 	 * about file delivery order can be made under concurrent access.
-	 * @param receptionOrderComparator
-	 *            the comparator to be used to order the files in the internal
-	 *            queue
+	 * @param receptionOrderComparator the comparator to be used to order the files in the internal queue
 	 */
 	public FileReadingMessageSource(@Nullable Comparator<File> receptionOrderComparator) {
 		this.toBeReceived = new PriorityBlockingQueue<>(DEFAULT_INTERNAL_QUEUE_CAPACITY, receptionOrderComparator);
@@ -211,7 +208,7 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 	}
 
 	/**
-	 * Sets a {@link FileListFilter}.
+	 * Set a {@link FileListFilter}.
 	 * By default a {@link org.springframework.integration.file.filters.AcceptOnceFileListFilter}
 	 * with no bounds is used. In most cases a customized {@link FileListFilter} will
 	 * be needed to deal with modification and duplication concerns.
@@ -227,10 +224,8 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 	}
 
 	/**
-	 * Optional. Sets a {@link FileLocker} to be used to guard files against
-	 * duplicate processing.
-	 * <p>
-	 * <b>The supplied FileLocker must be thread safe</b>
+	 * Set a {@link FileLocker} to be used to guard files against duplicate processing.
+	 * <p> <b>The supplied FileLocker must be thread safe</b>
 	 * @param locker a locker
 	 */
 	public void setLocker(FileLocker locker) {
@@ -239,7 +234,7 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 	}
 
 	/**
-	 * Optional. Set this flag if you want to make sure the internal queue is
+	 * Set this flag if you want to make sure the internal queue is
 	 * refreshed with the latest content of the input directory on each poll.
 	 * <p>
 	 * By default this implementation will empty its queue before looking at the
@@ -247,8 +242,7 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 	 * consider the effects of setting this flag. The internal
 	 * {@link java.util.concurrent.BlockingQueue} that this class is keeping
 	 * will more likely be out of sync with the file system if this flag is set
-	 * to <code>false</code>, but it will change more often (causing expensive
-	 * reordering) if it is set to <code>true</code>.
+	 * to false, but it will change more often (causing expensive reordering) if it is set to true.
 	 * @param scanEachPoll
 	 *            whether or not the component should re-scan (as opposed to not
 	 *            rescanning until the entire backlog has been delivered)
@@ -382,9 +376,7 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 		Set<File> freshFiles = new LinkedHashSet<>(filteredFiles);
 		if (!freshFiles.isEmpty()) {
 			this.toBeReceived.addAll(freshFiles);
-			if (logger.isDebugEnabled()) {
-				logger.debug("Added to queue: " + freshFiles);
-			}
+			logger.debug(() -> "Added to queue: " + freshFiles);
 		}
 	}
 
@@ -393,9 +385,7 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 	 * @param failedMessage the {@link Message} that failed
 	 */
 	public void onFailure(Message<File> failedMessage) {
-		if (logger.isWarnEnabled()) {
-			logger.warn("Failed to send: " + failedMessage);
-		}
+		logger.warn(() -> "Failed to send: " + failedMessage);
 		this.toBeReceived.offer(failedMessage.getPayload());
 	}
 
@@ -416,7 +406,7 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 
 	}
 
-	private class WatchServiceDirectoryScanner extends DefaultDirectoryScanner implements Lifecycle {
+	private class WatchServiceDirectoryScanner extends DefaultDirectoryScanner implements ManageableLifecycle {
 
 		private final ConcurrentMap<Path, WatchKey> pathKeys = new ConcurrentHashMap<>();
 
@@ -439,8 +429,8 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 			try {
 				this.watcher = FileSystems.getDefault().newWatchService();
 			}
-			catch (IOException e) {
-				logger.error("Failed to create watcher for " + FileReadingMessageSource.this.directory, e);
+			catch (IOException ex) {
+				logger.error(ex, () -> "Failed to create watcher for " + FileReadingMessageSource.this.directory);
 			}
 
 			this.kinds = new WatchEvent.Kind<?>[FileReadingMessageSource.this.watchEvents.length];
@@ -461,8 +451,8 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 				this.watcher = null;
 				this.pathKeys.clear();
 			}
-			catch (IOException e) {
-				logger.error("Failed to close watcher for " + FileReadingMessageSource.this.directory, e);
+			catch (IOException ex) {
+				logger.error(ex, () -> "Failed to close watcher for " + FileReadingMessageSource.this.directory);
 			}
 		}
 
@@ -473,7 +463,7 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 
 		@Override
 		protected File[] listEligibleFiles(File directory) {
-			Assert.state(this.watcher != null, "The WatchService has'nt been started");
+			Assert.state(this.watcher != null, "The WatchService hasn't been started");
 
 			Set<File> files = new LinkedHashSet<>();
 
@@ -493,13 +483,13 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 			while (key != null) {
 				File parentDir = ((Path) key.watchable()).toAbsolutePath().toFile();
 				for (WatchEvent<?> event : key.pollEvents()) {
-					if (event.kind() == StandardWatchEventKinds.ENTRY_CREATE ||
-							event.kind() == StandardWatchEventKinds.ENTRY_MODIFY ||
-							event.kind() == StandardWatchEventKinds.ENTRY_DELETE) {
+					if (StandardWatchEventKinds.ENTRY_CREATE.equals(event.kind()) ||
+							StandardWatchEventKinds.ENTRY_MODIFY.equals(event.kind()) ||
+							StandardWatchEventKinds.ENTRY_DELETE.equals(event.kind())) {
 
 						processFilesFromNormalEvent(files, parentDir, event);
 					}
-					else if (event.kind() == StandardWatchEventKinds.OVERFLOW) {
+					else if (StandardWatchEventKinds.OVERFLOW.equals(event.kind())) {
 						processFilesFromOverflowEvent(files, event);
 					}
 				}
@@ -512,17 +502,15 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 		private void processFilesFromNormalEvent(Set<File> files, File parentDir, WatchEvent<?> event) {
 			Path item = (Path) event.context();
 			File file = new File(parentDir, item.toFile().getName());
-			if (logger.isDebugEnabled()) {
-				logger.debug("Watch event [" + event.kind() + "] for file [" + file + "]");
-			}
+			logger.debug(() -> "Watch event [" + event.kind() + "] for file [" + file + "]");
 
-			if (event.kind() == StandardWatchEventKinds.ENTRY_DELETE) {
+			if (StandardWatchEventKinds.ENTRY_DELETE.equals(event.kind())) {
 				if (getFilter() instanceof ResettableFileListFilter) {
 					((ResettableFileListFilter<File>) getFilter()).remove(file);
 				}
 				boolean fileRemoved = files.remove(file);
-				if (fileRemoved && logger.isDebugEnabled()) {
-					logger.debug("The file [" + file +
+				if (fileRemoved) {
+					logger.debug(() -> "The file [" + file +
 							"] has been removed from the queue because of DELETE event.");
 				}
 			}
@@ -537,19 +525,15 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 					}
 				}
 				else {
-					if (logger.isDebugEnabled()) {
-						logger.debug("A file [" + file + "] for the event [" + event.kind() +
-								"] doesn't exist. Ignored.");
-					}
+					logger.debug(() -> "A file [" + file + "] for the event [" + event.kind() +
+							"] doesn't exist. Ignored.");
 				}
 			}
 		}
 
 		private void processFilesFromOverflowEvent(Set<File> files, WatchEvent<?> event) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Watch event [" + StandardWatchEventKinds.OVERFLOW +
-						"] with context [" + event.context() + "]");
-			}
+			logger.debug(() -> "Watch event [" + StandardWatchEventKinds.OVERFLOW +
+					"] with context [" + event.context() + "]");
 
 			for (WatchKey watchKey : this.pathKeys.values()) {
 				watchKey.cancel();
@@ -588,17 +572,15 @@ public class FileReadingMessageSource extends AbstractMessageSource<File>
 
 				});
 			}
-			catch (IOException e) {
-				logger.error("Failed to walk directory: " + directory.toString(), e);
+			catch (IOException ex) {
+				logger.error(ex, () -> "Failed to walk directory: " + directory.toString());
 			}
 			return walkedFiles;
 		}
 
 		private void registerWatch(Path dir) throws IOException {
 			if (!this.pathKeys.containsKey(dir)) {
-				if (logger.isDebugEnabled()) {
-					logger.debug("registering: " + dir + " for file events");
-				}
+				logger.debug(() -> "registering: " + dir + " for file events");
 				WatchKey watchKey = dir.register(this.watcher, this.kinds);
 				this.pathKeys.putIfAbsent(dir, watchKey);
 			}

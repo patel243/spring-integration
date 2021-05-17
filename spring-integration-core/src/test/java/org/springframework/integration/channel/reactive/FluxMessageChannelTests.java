@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,6 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 import reactor.core.Disposable;
-import reactor.core.publisher.EmitterProcessor;
 import reactor.core.publisher.Flux;
 
 /**
@@ -128,7 +127,7 @@ public class FluxMessageChannelTests {
 		IntegrationFlow testFlow = f -> f
 				.<String>split(__ -> Flux.fromStream(IntStream.range(0, 100).boxed()), null)
 				.channel(flux)
-				.aggregate(a -> a.releaseStrategy(m -> m.size() == 100))
+				.aggregate(a -> a.releaseStrategy(m -> m.size() == 100).releaseLockBeforeSend(true))
 				.handle(__ -> finishLatch.countDown());
 
 		IntegrationFlowContext.IntegrationFlowRegistration flowRegistration =
@@ -141,7 +140,7 @@ public class FluxMessageChannelTests {
 
 		flowRegistration.destroy();
 
-		assertThat(TestUtils.getPropertyValue(flux, "processor", EmitterProcessor.class).isTerminated()).isTrue();
+		assertThat(TestUtils.getPropertyValue(flux, "sink.sink.done", Boolean.class)).isTrue();
 	}
 
 	@Configuration

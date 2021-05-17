@@ -17,6 +17,7 @@
 package org.springframework.integration.ftp.outbound;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.fail;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -31,12 +32,12 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -62,7 +63,6 @@ import org.springframework.integration.channel.DirectChannel;
 import org.springframework.integration.endpoint.SourcePollingChannelAdapter;
 import org.springframework.integration.file.FileHeaders;
 import org.springframework.integration.file.filters.FileListFilter;
-import org.springframework.integration.file.remote.InputStreamCallback;
 import org.springframework.integration.file.remote.MessageSessionCallback;
 import org.springframework.integration.file.remote.RemoteFileTemplate;
 import org.springframework.integration.file.remote.gateway.AbstractRemoteFileOutboundGateway.Option;
@@ -210,17 +210,9 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 
 	@Test
 	public void testInt2866InvalidLocalDirectoryExpression() {
-		try {
-			this.invalidDirExpression.send(new GenericMessage<Object>("/ftpSource/ ftpSource1.txt"));
-			fail("Exception expected.");
-		}
-		catch (Exception e) {
-			Throwable cause = e.getCause();
-			assertThat(cause).isNotNull();
-			cause = cause.getCause();
-			assertThat(cause).isInstanceOf(IllegalArgumentException.class);
-			assertThat(cause.getMessage()).startsWith("Failed to make local directory");
-		}
+		assertThatCode(() -> this.invalidDirExpression.send(new GenericMessage<Object>("/ftpSource/ ftpSource1.txt")))
+				.hasRootCauseInstanceOf(IllegalArgumentException.class)
+				.hasStackTraceContaining("Failed to make local directory");
 	}
 
 	@Test
@@ -383,19 +375,19 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 	}
 
 	@Test
-	public void testRawGETWithTemplate() throws Exception {
-		RemoteFileTemplate<FTPFile> template = new RemoteFileTemplate<FTPFile>(this.ftpSessionFactory);
+	public void testRawGETWithTemplate() {
+		RemoteFileTemplate<FTPFile> template = new RemoteFileTemplate<>(this.ftpSessionFactory);
 		template.setFileNameExpression(new SpelExpressionParser().parseExpression("payload"));
 		template.setBeanFactory(mock(BeanFactory.class));
 		template.afterPropertiesSet();
 		final ByteArrayOutputStream baos1 = new ByteArrayOutputStream();
-		assertThat(template.get(new GenericMessage<String>("ftpSource/ ftpSource1.txt"),
-				(InputStreamCallback) stream -> FileCopyUtils.copy(stream, baos1))).isTrue();
+		assertThat(template.get(new GenericMessage<>("ftpSource/ ftpSource1.txt"),
+				stream -> FileCopyUtils.copy(stream, baos1))).isTrue();
 		assertThat(new String(baos1.toByteArray())).isEqualTo("source1");
 
 		final ByteArrayOutputStream baos2 = new ByteArrayOutputStream();
-		assertThat(template.get(new GenericMessage<String>("ftpSource/ftpSource2.txt"),
-				(InputStreamCallback) stream -> FileCopyUtils.copy(stream, baos2))).isTrue();
+		assertThat(template.get(new GenericMessage<>("ftpSource/ftpSource2.txt"),
+				stream -> FileCopyUtils.copy(stream, baos2))).isTrue();
 		assertThat(new String(baos2.toByteArray())).isEqualTo("source2");
 	}
 
@@ -406,7 +398,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 		session = TestUtils.getPropertyValue(session, "targetSession", Session.class);
 		FTPClient client = spy(TestUtils.getPropertyValue(session, "client", FTPClient.class));
 		new DirectFieldAccessor(session).setPropertyValue("client", client);
-		this.inboundMPut.send(new GenericMessage<File>(getSourceLocalDirectory()));
+		this.inboundMPut.send(new GenericMessage<>(getSourceLocalDirectory()));
 		@SuppressWarnings("unchecked")
 		Message<List<String>> out = (Message<List<String>>) this.output.receive(1000);
 		assertThat(out).isNotNull();
@@ -422,7 +414,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 
 	@Test
 	public void testInt3088MPutRecursive() {
-		this.inboundMPutRecursive.send(new GenericMessage<File>(getSourceLocalDirectory()));
+		this.inboundMPutRecursive.send(new GenericMessage<>(getSourceLocalDirectory()));
 		@SuppressWarnings("unchecked")
 		Message<List<String>> out = (Message<List<String>>) this.output.receive(1000);
 		assertThat(out).isNotNull();
@@ -441,7 +433,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 
 	@Test
 	public void testInt3088MPutRecursiveFiltered() {
-		this.inboundMPutRecursiveFiltered.send(new GenericMessage<File>(getSourceLocalDirectory()));
+		this.inboundMPutRecursiveFiltered.send(new GenericMessage<>(getSourceLocalDirectory()));
 		@SuppressWarnings("unchecked")
 		Message<List<String>> out = (Message<List<String>>) this.output.receive(1000);
 		assertThat(out).isNotNull();
@@ -573,7 +565,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 			throw new IOException("Failed to send localSource2");
 		}).when(session).write(Mockito.any(InputStream.class), Mockito.contains("localSource2"));
 		try {
-			this.inboundMPut.send(new GenericMessage<File>(getSourceLocalDirectory()));
+			this.inboundMPut.send(new GenericMessage<>(getSourceLocalDirectory()));
 			fail("expected exception");
 		}
 		catch (PartialSuccessException e) {
@@ -597,7 +589,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 			throw new IOException("Failed to send subLocalSource2");
 		}).when(session).write(Mockito.any(InputStream.class), Mockito.contains("subLocalSource2"));
 		try {
-			this.inboundMPutRecursive.send(new GenericMessage<File>(getSourceLocalDirectory()));
+			this.inboundMPutRecursive.send(new GenericMessage<>(getSourceLocalDirectory()));
 			fail("expected exception");
 		}
 		catch (PartialSuccessException e) {
@@ -636,7 +628,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 
 	@Test
 	public void testMessageSessionCallback() {
-		this.inboundCallback.send(new GenericMessage<String>("foo"));
+		this.inboundCallback.send(new GenericMessage<>("foo"));
 		Message<?> receive = this.output.receive(10000);
 		assertThat(receive).isNotNull();
 		assertThat(receive.getPayload()).isEqualTo("FOO");
@@ -649,7 +641,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 		((FTPClient) session.getClientInstance()).changeWorkingDirectory("ftpSource");
 		session.close();
 
-		this.inboundLs.send(new GenericMessage<String>("foo"));
+		this.inboundLs.send(new GenericMessage<>("foo"));
 		Message<?> receive = this.output.receive(10000);
 		assertThat(receive).isNotNull();
 		assertThat(receive.getPayload()).isInstanceOf(List.class);
@@ -676,10 +668,10 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 		assertThat(files.size()).isEqualTo(3);
 		assertThat(files).contains("subFtpSource", " ftpSource1.txt", "ftpSource2.txt");
 
-		FTPFile[] ftpFiles = ftpSessionFactory.getSession().list(null);
+		FTPFile[] ftpFiles = ftpSessionFactory.getSession().list("ftpSource");
 		for (FTPFile ftpFile : ftpFiles) {
 			if (!ftpFile.isDirectory()) {
-				assertThat(files.contains(ftpFile.getName())).isTrue();
+				assertThat(files).contains(ftpFile.getName());
 			}
 		}
 	}
@@ -723,7 +715,6 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 		});
 		resetSessionCache();
 		assertThat(this.config.latch.await(10, TimeUnit.SECONDS)).isTrue();
-		assertThat(this.config.events).hasSize(11);
 		assertThat(this.config.events.get(0)).isInstanceOf(SessionOpenedEvent.class);
 		assertThat(this.config.events.get(1)).isInstanceOf(DirectoryCreatedEvent.class);
 		DirectoryCreatedEvent dce = (DirectoryCreatedEvent) this.config.events.get(1);
@@ -791,7 +782,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 			implements MessageSessionCallback<FTPFile, Object> {
 
 		@Override
-		public Object doInSession(Session<FTPFile> session, Message<?> requestMessage) throws IOException {
+		public Object doInSession(Session<FTPFile> session, Message<?> requestMessage) {
 			return ((String) requestMessage.getPayload()).toUpperCase();
 		}
 
@@ -800,7 +791,7 @@ public class FtpServerOutboundTests extends FtpTestSupport {
 	@Component
 	public static class Config {
 
-		final List<ApacheMinaFtpEvent> events = new ArrayList<>();
+		final List<ApacheMinaFtpEvent> events = new CopyOnWriteArrayList<>();
 
 		private volatile String targetLocalDirectoryName;
 

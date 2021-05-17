@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,11 @@ import org.springframework.jmx.export.annotation.ManagedOperation;
  * @author Dave Syer
  * @author Gary Russell
  *
+ * @deprecated this is no longer used by the framework. Replaced by
+ * {@link org.springframework.integration.support.management.ManageableLifecycle}.
+ *
  */
+@Deprecated
 @IntegrationManagedResource
 public class ManagedEndpoint implements Lifecycle {
 

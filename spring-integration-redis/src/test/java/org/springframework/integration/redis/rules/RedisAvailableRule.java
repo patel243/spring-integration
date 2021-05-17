@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,8 @@ public final class RedisAvailableRule implements MethodRule {
 
 	public static LettuceConnectionFactory connectionFactory;
 
+	private static volatile boolean initialized;
+
 	protected static void setupConnectionFactory() {
 		RedisStandaloneConfiguration redisStandaloneConfiguration = new RedisStandaloneConfiguration();
 		redisStandaloneConfiguration.setPort(REDIS_PORT);
@@ -52,37 +54,43 @@ public final class RedisAvailableRule implements MethodRule {
 								.socketOptions(
 										SocketOptions.builder()
 												.connectTimeout(Duration.ofMillis(10000))
+												.keepAlive(true)
 												.build())
 								.build())
 				.commandTimeout(Duration.ofSeconds(10000))
 				.build();
 
 		connectionFactory = new LettuceConnectionFactory(redisStandaloneConfiguration, clientConfiguration);
-		connectionFactory.afterPropertiesSet();
+		connectionFactory.setEagerInitialization(true);
 	}
 
 
 	public static void cleanUpConnectionFactoryIfAny() {
-		if (connectionFactory != null) {
+		if (initialized) {
 			connectionFactory.destroy();
+			initialized = false;
 		}
 	}
 
 
 	public Statement apply(final Statement base, final FrameworkMethod method, Object target) {
 		return new Statement() {
+
 			@Override
 			public void evaluate() throws Throwable {
 				RedisAvailable redisAvailable = method.getAnnotation(RedisAvailable.class);
 				if (redisAvailable != null) {
 					if (connectionFactory != null) {
 						try {
-							connectionFactory.getConnection();
-							base.evaluate();
+							connectionFactory.afterPropertiesSet();
+							initialized = true;
 						}
 						catch (Exception e) {
-							Assume.assumeTrue("Skipping test due to Redis not being available on port: " + REDIS_PORT + ": " + e, false);
+							Assume.assumeTrue(
+									"Skipping test due to Redis not being available on port: " + REDIS_PORT + ": " + e,
+									false);
 						}
+						base.evaluate();
 					}
 				}
 			}

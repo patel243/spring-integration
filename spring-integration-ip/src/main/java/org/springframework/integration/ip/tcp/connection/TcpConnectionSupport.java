@@ -1,5 +1,5 @@
 /*
- * Copyright 2001-2020 the original author or authors.
+ * Copyright 2001-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ package org.springframework.integration.ip.tcp.connection;
 
 import java.net.InetAddress;
 import java.net.Socket;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -68,6 +70,8 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 
 	private final SocketInfo socketInfo;
 
+	private final List<TcpSender> senders = Collections.synchronizedList(new ArrayList<>());
+
 	@SuppressWarnings("rawtypes")
 	private Deserializer deserializer;
 
@@ -80,8 +84,6 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 
 	private volatile TcpListener testListener;
 
-	private TcpSender sender;
-
 	private String connectionId;
 
 	private String hostName = "unknown";
@@ -93,6 +95,10 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	private boolean noReadErrorOnClose;
 
 	private boolean manualListenerRegistration;
+
+	private boolean wrapped;
+
+	private TcpConnectionSupport wrapper;
 
 	/*
 	 * This boolean is to avoid looking for a temporary listener when not needed
@@ -114,7 +120,7 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	}
 
 	/**
-	 * Creates a {@link TcpConnectionSupport} object and publishes a
+	 * Create a {@link TcpConnectionSupport} object and publishes a
 	 * {@link TcpConnectionOpenEvent}, if an event publisher is provided.
 	 * @param socket the underlying socket.
 	 * @param server true if this connection is a server connection
@@ -158,12 +164,14 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	}
 
 	/**
-	 * Closes this connection.
+	 * Close this connection.
 	 */
 	@Override
 	public void close() {
-		if (this.sender != null) {
-			this.sender.removeDeadConnection(this);
+		if (!this.wrapped) {
+			for (TcpSender sender : this.senders) {
+				sender.removeDeadConnection(this);
+			}
 		}
 		// close() may be called multiple times; only publish once
 		if (!this.closePublished.getAndSet(true)) {
@@ -174,7 +182,6 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	/**
 	 * If we have been intercepted, propagate the close from the outermost interceptor;
 	 * otherwise, just call close().
-	 *
 	 * @param isException true when this call is the result of an Exception.
 	 */
 	protected void closeConnection(boolean isException) {
@@ -192,6 +199,9 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 				outerListener = nextListener;
 			}
 			outerListener.close();
+			for (TcpSender sender : getSenders()) {
+				sender.removeDeadConnection(outerListener);
+			}
 			if (isException) {
 				// ensure physical close in case the interceptor did not close
 				this.close();
@@ -262,6 +272,10 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 		this.needsTest = needsTest;
 	}
 
+	void setSenders(List<TcpSender> senders) {
+		this.senders.addAll(senders);
+	}
+
 	/**
 	 * Set the listener that will receive incoming Messages.
 	 * @param listener The listener.
@@ -273,8 +287,7 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 
 	/**
 	 * Set a temporary listener to receive just the first incoming message.
-	 * Used in conjunction with a connectionTest in a client connection
-	 * factory.
+	 * Used in conjunction with a connectionTest in a client connection factory.
 	 * @param tListener the test listener.
 	 * @since 5.3
 	 */
@@ -294,14 +307,28 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	}
 
 	/**
-	 * Registers a sender. Used on server side connections so a
+	 * Register a sender. Used on server side connections so a
 	 * sender can determine which connection to send a reply
 	 * to.
-	 * @param sender the sender.
+	 * @param senderToRegister the sender.
 	 */
-	public void registerSender(@Nullable TcpSender sender) {
-		this.sender = sender;
-		if (sender != null) {
+	public void registerSender(@Nullable TcpSender senderToRegister) {
+		if (senderToRegister != null) {
+			this.senders.add(senderToRegister);
+			senderToRegister.addNewConnection(this);
+		}
+	}
+
+	/**
+	 * Register the senders. Used on server side connections so a
+	 * sender can determine which connection to send a reply
+	 * to.
+	 * @param sendersToRegister the sender.
+	 * @since 5.4
+	 */
+	public void registerSenders(List<TcpSender> sendersToRegister) {
+		this.senders.addAll(sendersToRegister);
+		for (TcpSender sender : sendersToRegister) {
 			sender.addNewConnection(this);
 		}
 	}
@@ -316,10 +343,14 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 			return this.testListener;
 		}
 		if (this.manualListenerRegistration && !this.testFailed) {
-			if (this.logger.isDebugEnabled()) {
+			boolean debugEnabled = this.logger.isDebugEnabled();
+			if (debugEnabled) {
 				this.logger.debug(getConnectionId() + " Waiting for listener registration");
 			}
 			waitForListenerRegistration();
+			if (debugEnabled) {
+				this.logger.debug(getConnectionId() + " Listener registered");
+			}
 		}
 		return this.listener;
 	}
@@ -336,10 +367,20 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	}
 
 	/**
-	 * @return the sender
+	 * @return the first sender, if present.
 	 */
+	@Nullable
 	public TcpSender getSender() {
-		return this.sender;
+		return this.senders.size() > 0 ? this.senders.get(0) : null;
+	}
+
+	/**
+	 * Return the list of senders.
+	 * @return the senders.
+	 * @since 5.4
+	 */
+	public List<TcpSender> getSenders() {
+		return Collections.unmodifiableList(this.senders);
 	}
 
 	@Override
@@ -375,6 +416,24 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 		return this.socketInfo;
 	}
 
+	/**
+	 * Set to true if intercepted.
+	 * @param wrapped true if wrapped.
+	 * @since 5.4.5
+	 */
+	public void setWrapped(boolean wrapped) {
+		this.wrapped = wrapped;
+	}
+
+	/**
+	 * Set the wrapper.
+	 * @param wrapper the wrapper.
+	 * @since 5.4.6
+	 */
+	public void setWrapper(TcpConnectionSupport wrapper) {
+		this.wrapper = wrapper;
+	}
+
 	public String getConnectionFactoryName() {
 		return this.connectionFactoryName;
 	}
@@ -390,23 +449,37 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	protected final void sendExceptionToListener(Exception e) {
 		TcpListener listenerForException = getListener();
 		if (!this.exceptionSent.getAndSet(true) && listenerForException != null) {
-			Map<String, Object> headers = Collections.singletonMap(IpHeaders.CONNECTION_ID,
-					(Object) this.getConnectionId());
+			Map<String, Object> headers = Collections.singletonMap(IpHeaders.CONNECTION_ID, getConnectionId());
 			ErrorMessage errorMessage = new ErrorMessage(e, headers);
 			listenerForException.onMessage(errorMessage);
 		}
 	}
 
 	protected void publishConnectionOpenEvent() {
-		doPublish(new TcpConnectionOpenEvent(this, getConnectionFactoryName()));
+		if (this.wrapper != null) {
+			this.wrapper.publishConnectionOpenEvent();
+		}
+		else {
+			doPublish(new TcpConnectionOpenEvent(this, getConnectionFactoryName()));
+		}
 	}
 
 	protected void publishConnectionCloseEvent() {
-		doPublish(new TcpConnectionCloseEvent(this, getConnectionFactoryName()));
+		if (this.wrapper != null) {
+			this.wrapper.publishConnectionCloseEvent();
+		}
+		else {
+			doPublish(new TcpConnectionCloseEvent(this, getConnectionFactoryName()));
+		}
 	}
 
 	protected void publishConnectionExceptionEvent(Throwable t) {
-		doPublish(new TcpConnectionExceptionEvent(this, getConnectionFactoryName(), t));
+		if (this.wrapper != null) {
+			this.wrapper.publishConnectionExceptionEvent(t);
+		}
+		else {
+			doPublish(new TcpConnectionExceptionEvent(this, getConnectionFactoryName(), t));
+		}
 	}
 
 	/**
@@ -415,7 +488,7 @@ public abstract class TcpConnectionSupport implements TcpConnection {
 	 * @param event the event to publish.
 	 */
 	public void publishEvent(TcpConnectionEvent event) {
-		Assert.isTrue(event.getSource() == this, "Can only publish events with this as the source");
+		Assert.isTrue(equals(event.getSource()), "Can only publish events with this as the source");
 		this.doPublish(event);
 	}
 

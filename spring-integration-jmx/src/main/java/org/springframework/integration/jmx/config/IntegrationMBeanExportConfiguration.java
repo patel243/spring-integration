@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,8 +26,6 @@ import javax.management.MBeanServer;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.config.BeanExpressionContext;
 import org.springframework.beans.factory.config.BeanExpressionResolver;
@@ -42,7 +40,6 @@ import org.springframework.context.expression.StandardBeanExpressionResolver;
 import org.springframework.core.annotation.AnnotationAttributes;
 import org.springframework.core.env.Environment;
 import org.springframework.core.type.AnnotationMetadata;
-import org.springframework.integration.config.IntegrationManagementConfigurer;
 import org.springframework.integration.monitor.IntegrationMBeanExporter;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
@@ -76,10 +73,6 @@ public class IntegrationMBeanExportConfiguration implements ImportAware, Environ
 
 	private Environment environment;
 
-	@Autowired(required = false)
-	@Qualifier(IntegrationManagementConfigurer.MANAGEMENT_CONFIGURER_NAME)
-	private IntegrationManagementConfigurer configurer;
-
 	@Override
 	public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
 		this.beanFactory = beanFactory;
@@ -102,7 +95,6 @@ public class IntegrationMBeanExportConfiguration implements ImportAware, Environ
 				"@EnableIntegrationMBeanExport is not present on importing class " + importMetadata.getClassName());
 	}
 
-	@SuppressWarnings("deprecation")
 	@Bean(name = MBEAN_EXPORTER_NAME)
 	@Role(BeanDefinition.ROLE_INFRASTRUCTURE)
 	public IntegrationMBeanExporter mbeanExporter() {
@@ -111,14 +103,6 @@ public class IntegrationMBeanExportConfiguration implements ImportAware, Environ
 		setupDomain(exporter);
 		setupServer(exporter);
 		setupComponentNamePatterns(exporter);
-		if (this.configurer != null) {
-			if (this.configurer.getDefaultCountsEnabled() == null) {
-				this.configurer.setDefaultCountsEnabled(true);
-			}
-			if (this.configurer.getDefaultStatsEnabled() == null) {
-				this.configurer.setDefaultStatsEnabled(true);
-			}
-		}
 		return exporter;
 	}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package org.springframework.integration.jdbc.lock;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -25,26 +26,27 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import javax.sql.DataSource;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.task.AsyncTaskExecutor;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
 import org.springframework.integration.test.util.TestUtils;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 /**
  * @author Dave Syer
  * @author Artem Bilan
+ * @author Stefan Vassilev
+ * @author Alexandre Strubel
  *
  * @since 4.3
  */
-@ContextConfiguration
-@RunWith(SpringJUnit4ClassRunner.class)
+@SpringJUnitConfig
 @DirtiesContext
 public class JdbcLockRegistryTests {
 
@@ -56,7 +58,10 @@ public class JdbcLockRegistryTests {
 	@Autowired
 	private LockRepository client;
 
-	@Before
+	@Autowired
+	private DataSource dataSource;
+
+	@BeforeEach
 	public void clear() {
 		this.registry.expireUnusedOlderThan(0);
 		this.client.close();
@@ -95,7 +100,7 @@ public class JdbcLockRegistryTests {
 	}
 
 	@Test
-	public void testReentrantLock() throws Exception {
+	public void testReentrantLock() {
 		for (int i = 0; i < 10; i++) {
 			Lock lock1 = this.registry.obtain("foo");
 			lock1.lock();
@@ -125,6 +130,26 @@ public class JdbcLockRegistryTests {
 			finally {
 				lock1.unlock();
 			}
+		}
+	}
+
+	@Test
+	public void testReentrantLockAfterExpiration() throws Exception {
+		DefaultLockRepository client = new DefaultLockRepository(dataSource);
+		client.setTimeToLive(1);
+		client.afterPropertiesSet();
+		JdbcLockRegistry registry = new JdbcLockRegistry(client);
+		Lock lock1 = registry.obtain("foo");
+		assertThat(lock1.tryLock()).isTrue();
+		Thread.sleep(100);
+		try {
+			Lock lock2 = registry.obtain("foo");
+			assertThat(lock2).isSameAs(lock1);
+			assertThat(lock2.tryLock()).isTrue();
+			lock2.unlock();
+		}
+		finally {
+			lock1.unlock();
 		}
 	}
 
@@ -168,7 +193,7 @@ public class JdbcLockRegistryTests {
 		lock1.unlock();
 		Object ise = result.get(10, TimeUnit.SECONDS);
 		assertThat(ise).isInstanceOf(IllegalMonitorStateException.class);
-		assertThat(((Exception) ise).getMessage()).contains("You do not own");
+		assertThat(((Exception) ise).getMessage()).contains("own");
 	}
 
 	@Test
@@ -263,7 +288,28 @@ public class JdbcLockRegistryTests {
 		lock.unlock();
 		Object imse = result.get(10, TimeUnit.SECONDS);
 		assertThat(imse).isInstanceOf(IllegalMonitorStateException.class);
-		assertThat(((Exception) imse).getMessage()).contains("You do not own");
+		assertThat(((Exception) imse).getMessage()).contains("own");
+	}
+
+	@Test
+	public void testLockRenew() {
+		final Lock lock = this.registry.obtain("foo");
+
+		assertThat(lock.tryLock()).isTrue();
+		try {
+			registry.renewLock("foo");
+		}
+		finally {
+			lock.unlock();
+		}
+	}
+
+	@Test
+	public void testLockRenewLockNotOwned() {
+		this.registry.obtain("foo");
+
+		assertThatExceptionOfType(IllegalMonitorStateException.class)
+				.isThrownBy(() -> registry.renewLock("foo"));
 	}
 
 }

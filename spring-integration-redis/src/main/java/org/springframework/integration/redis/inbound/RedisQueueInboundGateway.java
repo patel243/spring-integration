@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ import org.springframework.integration.util.ErrorHandlingTaskExecutor;
 import org.springframework.jmx.export.annotation.ManagedMetric;
 import org.springframework.jmx.export.annotation.ManagedOperation;
 import org.springframework.jmx.export.annotation.ManagedResource;
+import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessagingException;
 import org.springframework.scheduling.SchedulingAwareRunnable;
@@ -56,8 +57,6 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 		implements ApplicationEventPublisherAware, BeanClassLoaderAware {
 
 	private static final String QUEUE_NAME_SUFFIX = ".reply";
-
-	private static final RedisSerializer<String> stringSerializer = new StringRedisSerializer();
 
 	public static final long DEFAULT_RECEIVE_TIMEOUT = 1000;
 
@@ -80,8 +79,6 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 	private long recoveryInterval = DEFAULT_RECOVERY_INTERVAL;
 
 	private boolean extractPayload = true;
-
-	private volatile boolean active;
 
 	private volatile boolean listening;
 
@@ -173,18 +170,18 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 
 	private void handlePopException(Exception e) {
 		this.listening = false;
-		if (this.active) {
-			logger.error("Failed to execute listening task. Will attempt to resubmit in " + this.recoveryInterval
-					+ " milliseconds.", e);
+		if (isActive()) {
+			logger.error(e, () ->
+					"Failed to execute listening task. Will attempt to resubmit in " + this.recoveryInterval
+							+ " milliseconds.");
 			publishException(e);
 			sleepBeforeRecoveryAttempt();
 		}
 		else {
-			logger.debug("Failed to execute listening task. " + e.getClass() + ": " + e.getMessage());
+			logger.debug(() -> "Failed to execute listening task. " + e.getClass() + ": " + e.getMessage());
 		}
 	}
 
-	@SuppressWarnings("unchecked")
 	private void receiveAndReply() {
 		byte[] value;
 		try {
@@ -194,13 +191,13 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 			handlePopException(e);
 			return;
 		}
-		String uuid = null;
+		String uuid;
 		if (value != null) {
-			if (!this.active) {
+			if (!isActive()) {
 				this.boundListOperations.rightPush(value);
 				return;
 			}
-			uuid = stringSerializer.deserialize(value);
+			uuid = StringRedisSerializer.UTF_8.deserialize(value);
 			if (uuid == null) {
 				return;
 			}
@@ -211,54 +208,70 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 				handlePopException(e);
 				return;
 			}
-			Message<Object> requestMessage = null;
 			if (value != null) {
-				if (!this.active) {
-					this.template.boundListOps(uuid).rightPush(value);
-					byte[] serialized = stringSerializer.serialize(uuid);
-					if (serialized != null) {
-						this.boundListOperations.rightPush(serialized);
-					}
-					return;
-				}
+				getRequestSendAndProduceReply(value, uuid);
+			}
+		}
+	}
+
+	@SuppressWarnings("unchecked")
+	private void getRequestSendAndProduceReply(byte[] value, String uuid) {
+		if (!isActive()) {
+			this.template.boundListOps(uuid).rightPush(value);
+			byte[] serialized = StringRedisSerializer.UTF_8.serialize(uuid);
+			if (serialized != null) {
+				this.boundListOperations.rightPush(serialized);
+			}
+			return;
+		}
+
+		Message<Object> requestMessage = prepareRequestMessage(value);
+
+		if (requestMessage != null) {
+			Message<?> replyMessage = sendAndReceiveMessage(requestMessage);
+			if (replyMessage != null) {
+				byte[] replyPayload = null;
 				if (this.extractPayload) {
-					Object payload = value;
-					if (this.serializer != null) {
-						payload = this.serializer.deserialize(value);
-						if (payload == null) {
-							return;
-						}
-					}
-					requestMessage = getMessageBuilderFactory().withPayload(payload).build();
+					replyPayload = extractReplyPayload(replyMessage);
 				}
 				else {
-					try {
-						requestMessage = (Message<Object>) this.serializer.deserialize(value);
-						if (requestMessage == null) {
-							return;
-						}
-					}
-					catch (Exception e) {
-						throw new MessagingException("Deserialization of Message failed.", e);
+					if (this.serializer != null) {
+						replyPayload = ((RedisSerializer<Object>) this.serializer).serialize(replyMessage);
 					}
 				}
-				Message<?> replyMessage = sendAndReceiveMessage(requestMessage);
-				if (replyMessage != null) {
-					if (this.extractPayload) {
-						value = extractReplyPayload(replyMessage);
-					}
-					else {
-						if (this.serializer != null) {
-							value = ((RedisSerializer<Object>) this.serializer).serialize(replyMessage);
-							if (value == null) {
-								return;
-							}
-						}
-					}
-					this.template.boundListOps(uuid + QUEUE_NAME_SUFFIX).leftPush(value);
+				if (replyPayload != null) {
+					this.template.boundListOps(uuid + QUEUE_NAME_SUFFIX).leftPush(replyPayload);
 				}
 			}
 		}
+	}
+
+	@Nullable
+	@SuppressWarnings("unchecked")
+	private Message<Object> prepareRequestMessage(byte[] value) {
+		Message<Object> requestMessage;
+		if (this.extractPayload) {
+			Object payload = value;
+			if (this.serializer != null) {
+				payload = this.serializer.deserialize(value);
+				if (payload == null) {
+					return null;
+				}
+			}
+			requestMessage = getMessageBuilderFactory().withPayload(payload).build();
+		}
+		else {
+			try {
+				requestMessage = (Message<Object>) this.serializer.deserialize(value);
+				if (requestMessage == null) {
+					return null;
+				}
+			}
+			catch (Exception e) {
+				throw new MessagingException("Deserialization of Message failed.", e);
+			}
+		}
+		return requestMessage;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -266,7 +279,7 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 		byte[] value;
 		if (!(replyMessage.getPayload() instanceof byte[])) {
 			if (replyMessage.getPayload() instanceof String && !this.serializerExplicitlySet) {
-				value = stringSerializer.serialize((String) replyMessage.getPayload());
+				value = StringRedisSerializer.UTF_8.serialize((String) replyMessage.getPayload());
 			}
 			else {
 				value = ((RedisSerializer<Object>) this.serializer).serialize(replyMessage.getPayload());
@@ -281,10 +294,7 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 	@Override
 	protected void doStart() {
 		super.doStart();
-		if (!this.active) {
-			this.active = true;
-			this.restart();
-		}
+		restart();
 	}
 
 	/**
@@ -308,9 +318,7 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 			this.applicationEventPublisher.publishEvent(new RedisExceptionEvent(this, e));
 		}
 		else {
-			if (logger.isDebugEnabled()) {
-				logger.debug("No application event publisher for exception: " + e.getMessage());
-			}
+			logger.debug(() -> "No application event publisher for exception: " + e.getMessage());
 		}
 	}
 
@@ -327,7 +335,6 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 	@Override
 	protected void doStop() {
 		super.doStop();
-		this.active = false;
 		this.listening = false;
 	}
 
@@ -369,13 +376,13 @@ public class RedisQueueInboundGateway extends MessagingGatewaySupport
 		@Override
 		public void run() {
 			try {
-				while (RedisQueueInboundGateway.this.active) {
+				while (isActive()) {
 					RedisQueueInboundGateway.this.listening = true;
 					receiveAndReply();
 				}
 			}
 			finally {
-				if (RedisQueueInboundGateway.this.active) {
+				if (isActive()) {
 					restart();
 				}
 				else if (RedisQueueInboundGateway.this.stopCallback != null) {

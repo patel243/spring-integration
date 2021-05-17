@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,12 +54,9 @@ import javax.mail.search.AndTerm;
 import javax.mail.search.FlagTerm;
 import javax.mail.search.FromTerm;
 
-import org.apache.commons.logging.Log;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import org.springframework.beans.DirectFieldAccessor;
@@ -67,6 +64,7 @@ import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.log.LogAccessor;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.integration.channel.DirectChannel;
@@ -76,7 +74,6 @@ import org.springframework.integration.history.MessageHistory;
 import org.springframework.integration.mail.support.DefaultMailHeaderMapper;
 import org.springframework.integration.test.mail.TestMailServer;
 import org.springframework.integration.test.mail.TestMailServer.ImapServer;
-import org.springframework.integration.test.support.LongRunningIntegrationTest;
 import org.springframework.integration.test.util.TestUtils;
 import org.springframework.messaging.MessageHeaders;
 import org.springframework.messaging.PollableChannel;
@@ -84,7 +81,8 @@ import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringRunner;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
+import org.springframework.util.MimeTypeUtils;
 
 import com.sun.mail.imap.IMAPFolder;
 
@@ -92,15 +90,13 @@ import com.sun.mail.imap.IMAPFolder;
  * @author Oleg Zhurakousky
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Alexander Pinske
  */
-@RunWith(SpringRunner.class)
+@SpringJUnitConfig
 @ContextConfiguration(
 		"classpath:org/springframework/integration/mail/config/ImapIdleChannelAdapterParserTests-context.xml")
 @DirtiesContext
 public class ImapMailReceiverTests {
-
-	@ClassRule
-	public static final LongRunningIntegrationTest longTests = new LongRunningIntegrationTest();
 
 	private AtomicInteger failed;
 
@@ -109,7 +105,7 @@ public class ImapMailReceiverTests {
 	@Autowired
 	private ApplicationContext context;
 
-	@Before
+	@BeforeEach
 	public void setup() throws InterruptedException {
 		failed = new AtomicInteger(0);
 		this.imapIdleServer = TestMailServer.imap(0);
@@ -120,7 +116,7 @@ public class ImapMailReceiverTests {
 		assertThat(n < 100).isTrue();
 	}
 
-	@After
+	@AfterEach
 	public void tearDown() {
 		this.imapIdleServer.stop();
 	}
@@ -187,13 +183,10 @@ public class ImapMailReceiverTests {
 		receiver.setMaxFetchSize(1);
 		receiver.setShouldDeleteMessages(false);
 		receiver.setShouldMarkMessagesAsRead(true);
-		receiver.setCancelIdleInterval(1);
 		ThreadPoolTaskScheduler taskScheduler = new ThreadPoolTaskScheduler();
 		setUpScheduler(receiver, taskScheduler);
 		receiver.setUserFlag("testSIUserFlag");
 		receiver.afterPropertiesSet();
-		Log logger = spy(TestUtils.getPropertyValue(receiver, "logger", Log.class));
-		new DirectFieldAccessor(receiver).setPropertyValue("logger", logger);
 		ImapIdleChannelAdapter adapter = new ImapIdleChannelAdapter(receiver);
 		QueueChannel channel = new QueueChannel();
 		adapter.setOutputChannel(channel);
@@ -222,7 +215,7 @@ public class ImapMailReceiverTests {
 			MessageHeaders headers = received.getHeaders();
 			assertThat(headers.get(MailHeaders.RAW_HEADERS)).isNotNull();
 			assertThat(headers.get(MailHeaders.CONTENT_TYPE)).isEqualTo("TEXT/PLAIN; charset=ISO-8859-1");
-			assertThat(headers.get(MessageHeaders.CONTENT_TYPE)).isEqualTo("TEXT/PLAIN; charset=ISO-8859-1");
+			assertThat(headers.get(MessageHeaders.CONTENT_TYPE)).isEqualTo(MimeTypeUtils.TEXT_PLAIN_VALUE);
 			assertThat(headers.get(MailHeaders.FROM)).isEqualTo("Bar <bar@baz>");
 			String[] toHeader = headers.get(MailHeaders.TO, String[].class);
 			assertThat(toHeader).isNotEmpty();
@@ -239,7 +232,6 @@ public class ImapMailReceiverTests {
 		}
 		assertThat(channel.receive(20000)).isNotNull(); // new message after idle
 		assertThat(channel.receive(100)).isNull(); // no new message after second and third idle
-		verify(logger).debug("Canceling IDLE");
 
 		adapter.stop();
 		taskScheduler.shutdown();
@@ -259,6 +251,7 @@ public class ImapMailReceiverTests {
 
 	private AbstractMailReceiver receiveAndMarkAsReadDontDeleteGuts(AbstractMailReceiver receiver, Message msg1,
 			Message msg2) throws NoSuchFieldException, IllegalAccessException, MessagingException {
+
 		((ImapMailReceiver) receiver).setShouldMarkMessagesAsRead(true);
 		receiver = spy(receiver);
 		receiver.setBeanFactory(mock(BeanFactory.class));
@@ -269,7 +262,7 @@ public class ImapMailReceiverTests {
 		given(folder.getPermanentFlags()).willReturn(new Flags(Flags.Flag.USER));
 		folderField.set(receiver, folder);
 
-		final Message[] messages = new Message[] { msg1, msg2 };
+		final Message[] messages = new Message[]{ msg1, msg2 };
 
 		willAnswer(invocation -> {
 			DirectFieldAccessor accessor = new DirectFieldAccessor(invocation.getMock());
@@ -334,7 +327,7 @@ public class ImapMailReceiverTests {
 
 		Message msg1 = mock(MimeMessage.class);
 		Message msg2 = mock(MimeMessage.class);
-		final Message[] messages = new Message[] { msg1, msg2 };
+		final Message[] messages = new Message[]{ msg1, msg2 };
 		willAnswer(invocation -> {
 			DirectFieldAccessor accessor = new DirectFieldAccessor(invocation.getMock());
 			int folderOpenMode = (int) accessor.getPropertyValue("folderOpenMode");
@@ -370,7 +363,7 @@ public class ImapMailReceiverTests {
 
 		Message msg1 = mock(MimeMessage.class);
 		Message msg2 = mock(MimeMessage.class);
-		final Message[] messages = new Message[] { msg1, msg2 };
+		final Message[] messages = new Message[]{ msg1, msg2 };
 		willAnswer(invocation -> null).given(receiver).openFolder();
 
 		willAnswer(invocation -> messages).given(receiver).searchForNewMessages();
@@ -399,7 +392,7 @@ public class ImapMailReceiverTests {
 
 		Message msg1 = mock(MimeMessage.class);
 		Message msg2 = mock(MimeMessage.class);
-		final Message[] messages = new Message[] { msg1, msg2 };
+		final Message[] messages = new Message[]{ msg1, msg2 };
 		willAnswer(invocation -> {
 			DirectFieldAccessor accessor = new DirectFieldAccessor(invocation.getMock());
 			int folderOpenMode = (int) accessor.getPropertyValue("folderOpenMode");
@@ -435,7 +428,7 @@ public class ImapMailReceiverTests {
 
 		Message msg1 = mock(MimeMessage.class);
 		Message msg2 = mock(MimeMessage.class);
-		final Message[] messages = new Message[] { msg1, msg2 };
+		final Message[] messages = new Message[]{ msg1, msg2 };
 		willAnswer(invocation -> {
 			DirectFieldAccessor accessor = new DirectFieldAccessor(invocation.getMock());
 			int folderOpenMode = (int) accessor.getPropertyValue("folderOpenMode");
@@ -470,7 +463,7 @@ public class ImapMailReceiverTests {
 		MimeMessage mailMessage = mock(MimeMessage.class);
 		Flags flags = mock(Flags.class);
 		given(mailMessage.getFlags()).willReturn(flags);
-		final Message[] messages = new Message[] { mailMessage };
+		final Message[] messages = new Message[]{ mailMessage };
 
 		willAnswer(invocation -> {
 			DirectFieldAccessor accessor = new DirectFieldAccessor((invocation.getMock()));
@@ -538,7 +531,7 @@ public class ImapMailReceiverTests {
 		MimeMessage mailMessage = mock(MimeMessage.class);
 		Flags flags = mock(Flags.class);
 		given(mailMessage.getFlags()).willReturn(flags);
-		final Message[] messages = new Message[] { mailMessage };
+		final Message[] messages = new Message[]{ mailMessage };
 
 		willAnswer(invocation -> messages).given(receiver).searchForNewMessages();
 
@@ -585,7 +578,7 @@ public class ImapMailReceiverTests {
 		MimeMessage mailMessage = mock(MimeMessage.class);
 		Flags flags = mock(Flags.class);
 		given(mailMessage.getFlags()).willReturn(flags);
-		final Message[] messages = new Message[] { mailMessage };
+		final Message[] messages = new Message[]{ mailMessage };
 
 		final AtomicInteger shouldFindMessagesCounter = new AtomicInteger(2);
 		willAnswer(invocation -> {
@@ -609,7 +602,7 @@ public class ImapMailReceiverTests {
 			Thread.sleep(300);
 			shouldFindMessagesCounter.set(1);
 			return null;
-		}).given(folder).idle();
+		}).given(folder).idle(true);
 
 		adapter.start();
 
@@ -658,7 +651,7 @@ public class ImapMailReceiverTests {
 		MimeMessage mailMessage = mock(MimeMessage.class);
 		Flags flags = mock(Flags.class);
 		given(mailMessage.getFlags()).willReturn(flags);
-		final Message[] messages = new Message[] { mailMessage };
+		final Message[] messages = new Message[]{ mailMessage };
 
 		willAnswer(invocation -> messages).given(receiver).searchForNewMessages();
 
@@ -667,9 +660,9 @@ public class ImapMailReceiverTests {
 		final CountDownLatch idles = new CountDownLatch(2);
 		willAnswer(invocation -> {
 			idles.countDown();
-			Thread.sleep(1000);
+			Thread.sleep(500);
 			return null;
-		}).given(folder).idle();
+		}).given(folder).idle(true);
 
 		adapter.start();
 
@@ -708,13 +701,13 @@ public class ImapMailReceiverTests {
 
 	@Test // see INT-1801
 	public void testImapLifecycleForRaceCondition() throws Exception {
-		for (int i = 0; i < 1000; i++) {
+		for (int i = 0; i < 100; i++) {
 			final ImapMailReceiver receiver = new ImapMailReceiver("imap://foo");
 			Store store = mock(Store.class);
 			Folder folder = mock(Folder.class);
 			given(folder.exists()).willReturn(true);
 			given(folder.isOpen()).willReturn(true);
-			given(folder.search(Mockito.any())).willReturn(new Message[] { });
+			given(folder.search(Mockito.any())).willReturn(new Message[]{ });
 			given(store.getFolder(Mockito.any(URLName.class))).willReturn(folder);
 			given(folder.getPermanentFlags()).willReturn(new Flags(Flags.Flag.USER));
 
@@ -796,7 +789,7 @@ public class ImapMailReceiverTests {
 		given(folder.isOpen()).willReturn(true);
 
 		Message message = new MimeMessage(null, new ClassPathResource("test.mail").getInputStream());
-		given(folder.search(Mockito.any())).willReturn(new Message[] { message });
+		given(folder.search(Mockito.any())).willReturn(new Message[]{ message });
 		given(store.getFolder(Mockito.any(URLName.class))).willReturn(folder);
 		given(folder.getPermanentFlags()).willReturn(new Flags(Flags.Flag.USER));
 		DirectFieldAccessor df = new DirectFieldAccessor(receiver);
@@ -811,8 +804,8 @@ public class ImapMailReceiverTests {
 	public void testNullMessages() throws Exception {
 		Message message1 = mock(Message.class);
 		Message message2 = mock(Message.class);
-		final Message[] messages1 = new Message[] { null, null, message1 };
-		final Message[] messages2 = new Message[] { message2 };
+		final Message[] messages1 = new Message[]{ null, null, message1 };
+		final Message[] messages2 = new Message[]{ message2 };
 		final SearchTermStrategy searchTermStrategy = mock(SearchTermStrategy.class);
 		class TestReceiver extends ImapMailReceiver {
 
@@ -872,9 +865,9 @@ public class ImapMailReceiverTests {
 		storeField.set(receiver, store);
 
 		ImapIdleChannelAdapter adapter = new ImapIdleChannelAdapter(receiver);
-		Log logger = spy(TestUtils.getPropertyValue(adapter, "logger", Log.class));
+		LogAccessor logger = spy(TestUtils.getPropertyValue(adapter, "logger", LogAccessor.class));
 		new DirectFieldAccessor(adapter).setPropertyValue("logger", logger);
-		willDoNothing().given(logger).warn(anyString(), any(Throwable.class));
+		willDoNothing().given(logger).warn(any(Throwable.class), anyString());
 		willAnswer(i -> {
 			i.callRealMethod();
 			throw new FolderClosedException(folder, "test");

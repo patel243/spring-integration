@@ -1,5 +1,5 @@
 /*
- * Copyright 2001-2020 the original author or authors.
+ * Copyright 2001-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@ import org.springframework.util.Assert;
  * A TcpConnection that uses and underlying {@link Socket}.
  *
  * @author Gary Russell
+ * @author Artem Bilan
  *
  * @since 2.0
  *
@@ -57,7 +58,7 @@ public class TcpNetConnection extends TcpConnectionSupport implements Scheduling
 	private volatile long lastSend;
 
 	/**
-	 * Constructs a TcpNetConnection for the socket.
+	 * Construct a TcpNetConnection for the socket.
 	 * @param socket the socket
 	 * @param server if true this connection was created as
 	 * a result of an incoming request.
@@ -188,46 +189,53 @@ public class TcpNetConnection extends TcpConnectionSupport implements Scheduling
 	 */
 	@Override
 	public void run() {
-		boolean okToRun = true;
-		if (logger.isDebugEnabled()) {
-			logger.debug(getConnectionId() + " Reading...");
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug(getConnectionId() + " Reading...");
 		}
-		while (okToRun) {
-			Message<?> message = null;
+		publishConnectionOpenEvent();
+		while (true) {
+			if (!receiveAndProcessMessage()) {
+				break;
+			}
+		}
+	}
+
+	private boolean receiveAndProcessMessage() {
+		Message<?> message = null;
+		try {
+			message = getMapper().toMessage(this);
+			this.lastRead = System.currentTimeMillis();
+		}
+		catch (Exception e) {
+			publishConnectionExceptionEvent(e);
+			if (handleReadException(e)) {
+				return false;
+			}
+		}
+		if (message != null) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Message received " + message);
+			}
 			try {
-				message = getMapper().toMessage(this);
-				this.lastRead = System.currentTimeMillis();
+				TcpListener listener = getListener();
+				if (listener == null) {
+					throw new NoListenerException("No listener");
+				}
+				listener.onMessage(message);
 			}
-			catch (Exception e) {
-				publishConnectionExceptionEvent(e);
-				if (handleReadException(e)) {
-					okToRun = false;
+			catch (NoListenerException nle) { // could also be thrown by an interceptor
+				if (logger.isWarnEnabled()) {
+					logger.warn("Unexpected message - no endpoint registered with connection interceptor: "
+							+ getConnectionId()
+							+ " - "
+							+ message);
 				}
 			}
-			if (okToRun && message != null) {
-				if (logger.isDebugEnabled()) {
-					logger.debug("Message received " + message);
-				}
-				try {
-					TcpListener listener = getListener();
-					if (listener == null) {
-						throw new NoListenerException("No listener");
-					}
-					listener.onMessage(message);
-				}
-				catch (@SuppressWarnings("unused") NoListenerException nle) { // could also be thrown by an interceptor
-					if (logger.isWarnEnabled()) {
-						logger.warn("Unexpected message - no endpoint registered with connection interceptor: "
-								+ getConnectionId()
-								+ " - "
-								+ message);
-					}
-				}
-				catch (Exception e2) {
-					logger.error("Exception sending message: " + message, e2);
-				}
+			catch (Exception e2) {
+				logger.error("Exception sending message: " + message, e2);
 			}
 		}
+		return true;
 	}
 
 	protected boolean handleReadException(Exception exception) {
@@ -238,7 +246,7 @@ public class TcpNetConnection extends TcpConnectionSupport implements Scheduling
 			if (!(e instanceof SoftEndOfStreamException)) {
 				if (e instanceof SocketTimeoutException) {
 					if (logger.isDebugEnabled()) {
-						logger.debug("Closed socket after timeout:" + getConnectionId());
+						logger.debug("Closed socket after timeout: " + getConnectionId());
 					}
 				}
 				else {

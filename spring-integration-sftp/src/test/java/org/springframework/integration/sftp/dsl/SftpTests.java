@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.File;
 import java.io.InputStream;
+import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Matcher;
 
@@ -56,9 +57,9 @@ import com.jcraft.jsch.ChannelSftp;
  * @author Artem Bilan
  * @author Gary Russell
  * @author Joaquin Santana
+ * @author Deepak Gunasekaran
  *
  * @since 5.0
- *
  */
 @SpringJUnitConfig
 @DirtiesContext
@@ -68,6 +69,7 @@ public class SftpTests extends SftpTestSupport {
 	private IntegrationFlowContext flowContext;
 
 	@Test
+	@SuppressWarnings("unchecked")
 	public void testSftpInboundFlow() {
 		QueueChannel out = new QueueChannel();
 		IntegrationFlow flow = IntegrationFlows
@@ -76,7 +78,8 @@ public class SftpTests extends SftpTestSupport {
 								.remoteDirectory("sftpSource")
 								.regexFilter(".*\\.txt$")
 								.localFilenameExpression("#this.toUpperCase() + '.a'")
-								.localDirectory(getTargetLocalDirectory()),
+								.localDirectory(getTargetLocalDirectory())
+						.remoteComparator(Comparator.naturalOrder()),
 						e -> e.id("sftpInboundAdapter").poller(Pollers.fixedDelay(100)))
 				.channel(out)
 				.get();
@@ -86,13 +89,13 @@ public class SftpTests extends SftpTestSupport {
 		Object payload = message.getPayload();
 		assertThat(payload).isInstanceOf(File.class);
 		File file = (File) payload;
-		assertThat(file.getName()).isIn(" SFTPSOURCE1.TXT.a", "SFTPSOURCE2.TXT.a");
+		assertThat(file.getName()).isEqualTo(" SFTPSOURCE1.TXT.a");
 		assertThat(file.getAbsolutePath()).contains("localTarget");
 
 		message = out.receive(10_000);
 		assertThat(message).isNotNull();
 		file = (File) message.getPayload();
-		assertThat(file.getName()).isIn(" SFTPSOURCE1.TXT.a", "SFTPSOURCE2.TXT.a");
+		assertThat(file.getName()).isIn("SFTPSOURCE2.TXT.a");
 		assertThat(file.getAbsolutePath()).contains("localTarget");
 
 		registration.destroy();
@@ -144,6 +147,51 @@ public class SftpTests extends SftpTestSupport {
 				session.list(getTargetRemoteDirectory().getName() + "/" + fileName));
 		assertThat(files.length).isEqualTo(1);
 		assertThat(files[0].getAttrs().getSize()).isEqualTo(3);
+
+		registration.destroy();
+	}
+
+	@Test
+	public void testSftpOutboundFlowSftpTemplate() {
+		SftpRemoteFileTemplate sftpTemplate = new SftpRemoteFileTemplate(sessionFactory());
+		IntegrationFlow flow = f -> f.handle(Sftp.outboundAdapter(sftpTemplate)
+				.useTemporaryFileName(false)
+				.fileNameExpression("headers['" + FileHeaders.FILENAME + "']")
+				.remoteDirectory("sftpTarget"));
+		IntegrationFlowRegistration registration = this.flowContext.registration(flow).register();
+		String fileName = "foo.file";
+		registration.getInputChannel().send(MessageBuilder.withPayload("foo")
+				.setHeader(FileHeaders.FILENAME, fileName)
+				.build());
+
+		ChannelSftp.LsEntry[] files = sftpTemplate.execute(session ->
+				session.list(getTargetRemoteDirectory().getName() + "/" + fileName));
+		assertThat(files.length).isEqualTo(1);
+		assertThat(files[0].getAttrs().getSize()).isEqualTo(3);
+
+		registration.destroy();
+	}
+
+	@Test
+	public void testSftpOutboundFlowSftpTemplateAndMode() {
+		SftpRemoteFileTemplate sftpTemplate = new SftpRemoteFileTemplate(sessionFactory());
+		IntegrationFlow flow = f -> f.handle(Sftp.outboundAdapter(sftpTemplate, FileExistsMode.APPEND)
+				.useTemporaryFileName(false)
+				.fileNameExpression("headers['" + FileHeaders.FILENAME + "']")
+				.remoteDirectory("sftpTarget"));
+		IntegrationFlowRegistration registration = this.flowContext.registration(flow).register();
+		String fileName = "foo.file";
+		registration.getInputChannel().send(MessageBuilder.withPayload("foo")
+				.setHeader(FileHeaders.FILENAME, fileName)
+				.build());
+		registration.getInputChannel().send(MessageBuilder.withPayload("foo")
+				.setHeader(FileHeaders.FILENAME, fileName)
+				.build());
+
+		ChannelSftp.LsEntry[] files = sftpTemplate.execute(session ->
+				session.list(getTargetRemoteDirectory().getName() + "/" + fileName));
+		assertThat(files.length).isEqualTo(1);
+		assertThat(files[0].getAttrs().getSize()).isEqualTo(6);
 
 		registration.destroy();
 	}

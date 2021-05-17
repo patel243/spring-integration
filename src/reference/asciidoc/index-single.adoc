@@ -49,11 +49,17 @@ include::./jpa.adoc[]
 
 include::./jms.adoc[]
 
+include::./jmx.adoc[]
+
+include::./kafka.adoc[]
+
 include::./mail.adoc[]
 
 include::./mongodb.adoc[]
 
 include::./mqtt.adoc[]
+
+include::./r2dbc.adoc[]
 
 include::./redis.adoc[]
 
@@ -82,6 +88,8 @@ include::./ws.adoc[]
 include::./xml.adoc[]
 
 include::./xmpp.adoc[]
+
+include::./zeromq.adoc[]
 
 include::./zookeeper.adoc[]
 

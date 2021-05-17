@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,8 +95,8 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 					port = ((InetSocketAddress) address).getPort();
 				}
 			}
-			catch (IOException e) {
-				logger.error("Error getting port", e);
+			catch (IOException ex) {
+				logger.error(ex, "Error getting port");
 			}
 		}
 		return port;
@@ -109,8 +109,8 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 			try {
 				return this.serverChannel.getLocalAddress();
 			}
-			catch (IOException e) {
-				logger.error("Error getting local address", e);
+			catch (IOException ex) {
+				logger.error(ex, "Error getting local address");
 			}
 		}
 		return null;
@@ -126,7 +126,7 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 	@Override
 	public void run() {
 		if (getListener() == null) {
-			logger.info(this + " No listener bound to server connection factory; will not read; exiting...");
+			logger.info(() -> this + " No listener bound to server connection factory; will not read; exiting...");
 			return;
 		}
 		try {
@@ -134,21 +134,18 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 			int port = super.getPort();
 			getTcpSocketSupport().postProcessServerSocket(this.serverChannel.socket());
 			this.serverChannel.configureBlocking(false);
-			if (getLocalAddress() == null) {
+			String localAddress = getLocalAddress();
+			if (localAddress == null) {
 				this.serverChannel.socket().bind(new InetSocketAddress(port), Math.abs(getBacklog()));
 			}
 			else {
-				InetAddress whichNic = InetAddress.getByName(getLocalAddress());
+				InetAddress whichNic = InetAddress.getByName(localAddress);
 				this.serverChannel.socket().bind(new InetSocketAddress(whichNic, port), Math.abs(getBacklog()));
 			}
-			if (logger.isInfoEnabled()) {
-				logger.info(this + " Listening");
-			}
+			logger.info(() -> this + " Listening");
 			final Selector theSelector = Selector.open();
 			if (this.serverChannel == null) {
-				if (logger.isDebugEnabled()) {
-					logger.debug(this + " stopped before registering the server channel");
-				}
+				logger.debug(() -> this + " stopped before registering the server channel");
 			}
 			else {
 				this.serverChannel.register(theSelector, SelectionKey.OP_ACCEPT);
@@ -158,10 +155,10 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 				doSelect(this.serverChannel, theSelector);
 			}
 		}
-		catch (IOException e) {
+		catch (IOException ex) {
 			if (isActive()) {
-				logger.error("Error on ServerChannel; port = " + getPort(), e);
-				publishServerExceptionEvent(e);
+				logger.error(ex, "Error on ServerChannel; port = " + getPort());
+				publishServerExceptionEvent(ex);
 			}
 			stop();
 		}
@@ -180,20 +177,19 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 	 * is complete, the socket is again registered for read interest.
 	 * @param server the ServerSocketChannel to select
 	 * @param selectorToSelect the Selector multiplexor
-	 * @throws IOException
+	 * @throws IOException a thrown IO exception
 	 */
 	private void doSelect(ServerSocketChannel server, final Selector selectorToSelect) throws IOException {
 		while (isActive()) {
 			int soTimeout = getSoTimeout();
-			int selectionCount = 0;
+			int selectionCount;
 			try {
 				long timeout = Math.max(soTimeout, 0);
 				if (getDelayedReads().size() > 0 && (timeout == 0 || getReadDelay() < timeout)) {
 					timeout = getReadDelay();
 				}
-				if (logger.isTraceEnabled()) {
-					logger.trace("Delayed reads: " + getDelayedReads().size() + " timeout " + timeout);
-				}
+				long timeoutToLog = timeout;
+				logger.trace(() -> "Delayed reads: " + getDelayedReads().size() + " timeout " + timeoutToLog);
 				selectionCount = selectorToSelect.select(timeout);
 				processNioSelections(selectionCount, selectorToSelect, server, this.channelMap);
 			}
@@ -202,7 +198,7 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 			}
 			catch (ClosedSelectorException cse) {
 				if (isActive()) {
-					logger.error("Selector closed", cse);
+					logger.error(cse, "Selector closed");
 					publishServerExceptionEvent(cse);
 					break;
 				}
@@ -221,20 +217,20 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 		try {
 			SocketChannel channel;
 			do {
-				channel = server.accept();
-				if (channel != null) {
+				SocketChannel theChannel = server.accept();
+				if (theChannel != null) {
 					if (isShuttingDown()) {
-						if (logger.isInfoEnabled()) {
-							logger.info("New connection from " + channel.socket().getInetAddress().getHostAddress()
-									+ ":" + channel.socket().getPort()
-									+ " rejected; the server is in the process of shutting down.");
-						}
-						channel.close();
+						logger.info(() ->
+								"New connection from " + theChannel.socket().getInetAddress().getHostAddress()
+										+ ":" + theChannel.socket().getPort()
+										+ " rejected; the server is in the process of shutting down.");
+						theChannel.close();
 					}
-					else if (createConnectionForAcceptedChannel(selectorForNewSocket, now, channel) == null) {
+					else if (createConnectionForAcceptedChannel(selectorForNewSocket, now, theChannel) == null) {
 						return;
 					}
 				}
+				channel = theChannel;
 			}
 			while (this.multiAccept && channel != null);
 		}
@@ -262,13 +258,12 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 				}
 				this.channelMap.put(channel, connection);
 				channel.register(selectorForNewSocket, SelectionKey.OP_READ, connection);
-				connection.publishConnectionOpenEvent();
 			}
 		}
-		catch (IOException e) {
-			logger.error("Exception accepting new connection from "
+		catch (IOException ex) {
+			logger.error(ex, "Exception accepting new connection from "
 					+ channel.socket().getInetAddress().getHostAddress()
-					+ ":" + channel.socket().getPort(), e);
+					+ ":" + channel.socket().getPort());
 			channel.close();
 		}
 		return connection;
@@ -281,11 +276,15 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 					isLookupHost(), getApplicationEventPublisher(), getComponentName());
 			connection.setUsingDirectBuffers(this.usingDirectBuffers);
 			TcpConnectionSupport wrappedConnection = wrapConnection(connection);
+			if (!wrappedConnection.equals(connection)) {
+				connection.setSenders(getSenders());
+			}
 			initializeConnection(wrappedConnection, socketChannel.socket());
+			wrappedConnection.publishConnectionOpenEvent();
 			return connection;
 		}
-		catch (Exception e) {
-			logger.error("Failed to establish new incoming connection", e);
+		catch (Exception ex) {
+			logger.error(ex, "Failed to establish new incoming connection");
 			return null;
 		}
 	}
@@ -297,8 +296,8 @@ public class TcpNioServerConnectionFactory extends AbstractServerConnectionFacto
 			try {
 				this.selector.close();
 			}
-			catch (Exception e) {
-				logger.error("Error closing selector", e);
+			catch (Exception ex) {
+				logger.error(ex, "Error closing selector");
 			}
 		}
 		if (this.serverChannel != null) {

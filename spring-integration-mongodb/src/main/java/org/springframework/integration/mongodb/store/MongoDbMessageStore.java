@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.bson.Document;
 import org.bson.conversions.Bson;
@@ -71,7 +72,7 @@ import org.springframework.integration.store.MessageStore;
 import org.springframework.integration.store.SimpleMessageGroup;
 import org.springframework.integration.support.MutableMessage;
 import org.springframework.integration.support.MutableMessageBuilder;
-import org.springframework.integration.support.converter.WhiteListDeserializingConverter;
+import org.springframework.integration.support.converter.AllowListDeserializingConverter;
 import org.springframework.jmx.export.annotation.ManagedAttribute;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
@@ -138,7 +139,7 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 
 	private ApplicationContext applicationContext;
 
-	private String[] whiteListPatterns;
+	private String[] allowedPatterns;
 
 	/**
 	 * Create a MongoDbMessageStore using the provided {@link MongoDatabaseFactory}.and the default collection name.
@@ -177,9 +178,10 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 	 * be fully qualified or a wildcard '*' is allowed at the beginning or end of the
 	 * class name. Examples: {@code com.foo.*}, {@code *.MyClass}.
 	 * @param patterns the patterns.
+	 * @since 5.4
 	 */
-	public void addWhiteListPatterns(String... patterns) {
-		this.whiteListPatterns = patterns != null ? Arrays.copyOf(patterns, patterns.length) : null;
+	public void addAllowedPatterns(String... patterns) {
+		this.allowedPatterns = patterns != null ? Arrays.copyOf(patterns, patterns.length) : null;
 	}
 
 	/**
@@ -284,6 +286,7 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 					.create(this, groupId, createdTime, complete);
 			messageGroup.setLastModified(lastModifiedTime);
 			messageGroup.setLastReleasedMessageSequenceNumber(lastReleasedSequence);
+			messageGroup.setCondition(messageWrapper.getCondition());
 			return messageGroup;
 
 		}
@@ -302,11 +305,12 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 		long createdTime = System.currentTimeMillis();
 		int lastReleasedSequence = 0;
 		boolean complete = false;
-
+		String condition = null;
 		if (messageDocument != null) {
 			createdTime = messageDocument.get_Group_timestamp();
 			lastReleasedSequence = messageDocument.get_LastReleasedSequenceNumber();
 			complete = messageDocument.get_Group_complete();
+			condition = messageDocument.getCondition();
 		}
 
 		for (Message<?> message : messages) {
@@ -316,7 +320,10 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 			wrapper.set_Group_update_timestamp(messageDocument == null ? createdTime : System.currentTimeMillis());
 			wrapper.set_Group_complete(complete);
 			wrapper.set_LastReleasedSequenceNumber(lastReleasedSequence);
-			wrapper.set_Sequence(getNextId());
+			wrapper.setSequence(getNextId());
+			if (condition != null) {
+				wrapper.setCondition(condition);
+			}
 
 			addMessageDocument(wrapper);
 		}
@@ -392,8 +399,13 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 	}
 
 	@Override
+	public void setGroupCondition(Object groupId, String condition) {
+		updateGroup(groupId, lastModifiedUpdate().set("_condition", condition));
+	}
+
+	@Override
 	public void setLastReleasedSequenceNumberForGroup(Object groupId, int sequenceNumber) {
-		this.updateGroup(groupId, lastModifiedUpdate().set(LAST_RELEASED_SEQUENCE_NUMBER, sequenceNumber));
+		updateGroup(groupId, lastModifiedUpdate().set(LAST_RELEASED_SEQUENCE_NUMBER, sequenceNumber));
 	}
 
 	@Override
@@ -426,22 +438,28 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 	}
 
 	@Override
+	public Stream<Message<?>> streamMessagesForGroup(Object groupId) {
+		Assert.notNull(groupId, GROUP_ID_MUST_NOT_BE_NULL);
+		Query query = whereGroupIdOrder(groupId);
+		Stream<MessageWrapper> messageWrappers =
+				this.template.stream(query, MessageWrapper.class, this.collectionName)
+						.stream();
+
+		return messageWrappers.map(MessageWrapper::getMessage);
+	}
+
+	@Override
 	@ManagedAttribute
 	public int getMessageCountForAllMessageGroups() {
-		Query query = Query.query(Criteria.where(MessageDocumentFields.MESSAGE_ID).exists(true)
-				.and(MessageDocumentFields.GROUP_ID).exists(true));
-		long count = this.template.count(query, this.collectionName);
-		Assert.isTrue(count <= Integer.MAX_VALUE, "Message count is out of Integer's range");
-		return (int) count;
+		Query query = Query.query(Criteria.where(GROUP_ID_KEY).exists(true));
+		return (int) this.template.count(query, this.collectionName);
 	}
 
 	@Override
 	@ManagedAttribute
 	public int getMessageGroupCount() {
-		Query query = Query.query(Criteria.where(MessageDocumentFields.GROUP_ID).exists(true));
-		return this.template.getCollection(this.collectionName)
-				.distinct(MessageDocumentFields.GROUP_ID, query.getQueryObject(), Object.class)
-				.into(new ArrayList<>())
+		Query query = Query.query(Criteria.where(GROUP_ID_KEY).exists(true));
+		return this.template.findDistinct(query, GROUP_ID_KEY, this.collectionName, Object.class)
 				.size();
 	}
 
@@ -471,17 +489,18 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 
 	private void updateGroup(Object groupId, Update update) {
 		Query query = whereGroupIdIs(groupId).with(Sort.by(Sort.Direction.DESC, GROUP_UPDATE_TIMESTAMP_KEY, SEQUENCE));
-		this.template.updateFirst(query, update, this.collectionName);
+		this.template.findAndModify(query, update, FindAndModifyOptions.none(), Map.class, this.collectionName);
 	}
 
-	private int getNextId() {
+	private long getNextId() {
 		Query query = Query.query(Criteria.where("_id").is(SEQUENCE_NAME));
 		query.fields().include(SEQUENCE);
-		return (Integer) this.template.findAndModify(query,
-				new Update().inc(SEQUENCE, 1),
+		return ((Number) this.template.findAndModify(query,
+				new Update().inc(SEQUENCE, 1L),
 				FindAndModifyOptions.options().returnNew(true).upsert(true),
-				Map.class,
-				this.collectionName).get(SEQUENCE); // NOSONAR - never returns null
+				Map.class, this.collectionName)
+				.get(SEQUENCE))  // NOSONAR - never returns null
+				.longValue();
 	}
 
 	@SuppressWarnings(UNCHECKED)
@@ -540,9 +559,9 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 			converters.add(new DocumentToGenericMessageConverter());
 			converters.add(new DocumentToMutableMessageConverter());
 			DocumentToErrorMessageConverter docToErrorMessageConverter = new DocumentToErrorMessageConverter();
-			if (MongoDbMessageStore.this.whiteListPatterns != null) {
+			if (MongoDbMessageStore.this.allowedPatterns != null) {
 				docToErrorMessageConverter.deserializingConverter
-						.addWhiteListPatterns(MongoDbMessageStore.this.whiteListPatterns);
+						.addAllowedPatterns(MongoDbMessageStore.this.allowedPatterns);
 			}
 			converters.add(docToErrorMessageConverter);
 			converters.add(new DocumentToAdviceMessageConverter());
@@ -609,6 +628,7 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 				if (completeGroup != null) {
 					wrapper.set_Group_complete(completeGroup);
 				}
+				wrapper.setCondition((String) sourceMap.get("_condition"));
 
 				return (S) wrapper;
 			}
@@ -772,7 +792,7 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 	@ReadingConverter
 	private class DocumentToErrorMessageConverter implements Converter<Document, ErrorMessage> {
 
-		private final WhiteListDeserializingConverter deserializingConverter = new WhiteListDeserializingConverter();
+		private final AllowListDeserializingConverter deserializingConverter = new AllowListDeserializingConverter();
 
 		DocumentToErrorMessageConverter() {
 		}
@@ -851,8 +871,10 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 
 		private volatile boolean _group_complete; // NOSONAR name
 
+		private volatile String _condition; // NOSONAR name
+
 		@SuppressWarnings(UNUSED)
-		private int sequence;
+		private long sequence;
 
 		MessageWrapper(Message<?> message) {
 			Assert.notNull(message, "'message' must not be null");
@@ -921,7 +943,15 @@ public class MongoDbMessageStore extends AbstractMessageGroupStore
 			this._group_complete = completedGroup;
 		}
 
-		public void set_Sequence(int sequence) { // NOSONAR name
+		public String getCondition() {
+			return this._condition;
+		}
+
+		public void setCondition(String condition) {
+			this._condition = condition;
+		}
+
+		public void setSequence(long sequence) {
 			this.sequence = sequence;
 		}
 

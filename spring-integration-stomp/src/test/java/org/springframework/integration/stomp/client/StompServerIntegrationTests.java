@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,13 +17,12 @@
 package org.springframework.integration.stomp.client;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
 import org.apache.activemq.broker.BrokerService;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.context.ApplicationEvent;
 import org.springframework.context.ApplicationListener;
@@ -46,7 +45,6 @@ import org.springframework.integration.stomp.event.StompSessionConnectedEvent;
 import org.springframework.integration.stomp.inbound.StompInboundChannelAdapter;
 import org.springframework.integration.stomp.outbound.StompMessageHandler;
 import org.springframework.integration.support.converter.PassThruMessageConverter;
-import org.springframework.integration.test.rule.Log4j2LevelAdjuster;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.MessageDeliveryException;
@@ -70,21 +68,14 @@ public class StompServerIntegrationTests {
 
 	private static ReactorNettyTcpStompClient stompClient;
 
-	@Rule
-	public Log4j2LevelAdjuster adjuster =
-			Log4j2LevelAdjuster.trace()
-					.categories(true, "org.springframework",
-							"org.apache.activemq.broker",
-							"reactor.ipc",
-							"io.netty");
-
-	@BeforeClass
+	@BeforeAll
 	public static void setup() throws Exception {
 		int port = SocketUtils.findAvailableTcpPort(61613);
 		activeMQBroker = new BrokerService();
 		activeMQBroker.addConnector("stomp://127.0.0.1:" + port);
 		activeMQBroker.setPersistent(false);
 		activeMQBroker.setUseJmx(false);
+		activeMQBroker.setEnableStatistics(false);
 		activeMQBroker.getSystemUsage().getMemoryUsage().setLimit(1024 * 1024 * 5);
 		activeMQBroker.getSystemUsage().getTempUsage().setLimit(1024 * 1024 * 5);
 		activeMQBroker.start();
@@ -97,8 +88,9 @@ public class StompServerIntegrationTests {
 		stompClient.setReceiptTimeLimit(5000);
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void teardown() throws Exception {
+		stompClient.shutdown();
 		activeMQBroker.stop();
 	}
 
@@ -116,11 +108,12 @@ public class StompServerIntegrationTests {
 		MessageChannel stompOutputChannel1 = context1.getBean("stompOutputChannel", MessageChannel.class);
 		MessageChannel stompOutputChannel2 = context2.getBean("stompOutputChannel", MessageChannel.class);
 
+		int n = 0;
 		Message<?> eventMessage;
 		do {
 			eventMessage = stompEvents1.receive(10000);
 		}
-		while (eventMessage != null && !(eventMessage.getPayload() instanceof StompSessionConnectedEvent));
+		while (eventMessage != null && !(eventMessage.getPayload() instanceof StompSessionConnectedEvent) && n++ < 100);
 
 		assertThat(eventMessage).isNotNull();
 
@@ -142,7 +135,7 @@ public class StompServerIntegrationTests {
 		assertThat(stompReceiptEvent.getStompCommand()).isEqualTo(StompCommand.SUBSCRIBE);
 		assertThat(stompReceiptEvent.getDestination()).isEqualTo("/topic/myTopic");
 
-		stompOutputChannel1.send(new GenericMessage<byte[]>("Hello, Client#2!".getBytes()));
+		stompOutputChannel1.send(new GenericMessage<>("Hello, Client#2!".getBytes()));
 
 		Message<?> receive11 = stompInputChannel1.receive(10000);
 		Message<?> receive21 = stompInputChannel2.receive(10000);
@@ -153,7 +146,7 @@ public class StompServerIntegrationTests {
 		assertThat((byte[]) receive11.getPayload()).isEqualTo("Hello, Client#2!".getBytes());
 		assertThat((byte[]) receive21.getPayload()).isEqualTo("Hello, Client#2!".getBytes());
 
-		stompOutputChannel2.send(new GenericMessage<byte[]>("Hello, Client#1!".getBytes()));
+		stompOutputChannel2.send(new GenericMessage<>("Hello, Client#1!".getBytes()));
 
 		Message<?> receive12 = stompInputChannel1.receive(10000);
 		Message<?> receive22 = stompInputChannel2.receive(10000);
@@ -175,7 +168,7 @@ public class StompServerIntegrationTests {
 		Lifecycle stompInboundChannelAdapter2 = context2.getBean("stompInboundChannelAdapter", Lifecycle.class);
 		stompInboundChannelAdapter2.stop();
 
-		stompOutputChannel1.send(new GenericMessage<byte[]>("How do you do?".getBytes()));
+		stompOutputChannel1.send(new GenericMessage<>("How do you do?".getBytes()));
 
 		Message<?> receive13 = stompInputChannel1.receive(10000);
 		assertThat(receive13).isNotNull();
@@ -192,7 +185,7 @@ public class StompServerIntegrationTests {
 		assertThat(stompReceiptEvent.getStompCommand()).isEqualTo(StompCommand.SUBSCRIBE);
 		assertThat(stompReceiptEvent.getDestination()).isEqualTo("/topic/myTopic");
 
-		stompOutputChannel1.send(new GenericMessage<byte[]>("???".getBytes()));
+		stompOutputChannel1.send(new GenericMessage<>("???".getBytes()));
 
 		Message<?> receive24 = stompInputChannel2.receive(10000);
 		assertThat(receive24).isNotNull();
@@ -200,28 +193,26 @@ public class StompServerIntegrationTests {
 
 		activeMQBroker.stop();
 
+		n = 0;
 		do {
 			eventMessage = stompEvents1.receive(10000);
 			assertThat(eventMessage).isNotNull();
 		}
-		while (!(eventMessage.getPayload() instanceof StompConnectionFailedEvent));
+		while (!(eventMessage.getPayload() instanceof StompConnectionFailedEvent) && n++ < 100);
 
-		try {
-			stompOutputChannel1.send(new GenericMessage<byte[]>("foo".getBytes()));
-			fail("MessageDeliveryException is expected");
-		}
-		catch (Exception e) {
-			assertThat(e).isInstanceOf(MessageDeliveryException.class);
-			assertThat(e.getMessage()).contains("could not deliver message");
-		}
+
+		assertThatExceptionOfType(MessageDeliveryException.class)
+				.isThrownBy(() -> stompOutputChannel1.send(new GenericMessage<>("foo".getBytes())))
+				.withMessageContaining("could not deliver message");
 
 		activeMQBroker.start(false);
 
+		n = 0;
 		do {
 			eventMessage = stompEvents1.receive(20000);
 			assertThat(eventMessage).isNotNull();
 		}
-		while (!(eventMessage.getPayload() instanceof StompReceiptEvent));
+		while (!(eventMessage.getPayload() instanceof StompReceiptEvent) && n++ < 100);
 
 		do {
 			eventMessage = stompEvents2.receive(10000);
@@ -229,7 +220,7 @@ public class StompServerIntegrationTests {
 		}
 		while (!(eventMessage.getPayload() instanceof StompReceiptEvent));
 
-		stompOutputChannel1.send(new GenericMessage<byte[]>("foo".getBytes()));
+		stompOutputChannel1.send(new GenericMessage<>("foo".getBytes()));
 		Message<?> receive25 = stompInputChannel2.receive(10000);
 		assertThat(receive25).isNotNull();
 		assertThat((byte[]) receive25.getPayload()).isEqualTo("foo".getBytes());
@@ -278,7 +269,6 @@ public class StompServerIntegrationTests {
 		}
 
 		@Bean
-		@SuppressWarnings("unchecked")
 		public ApplicationListener<ApplicationEvent> stompEventListener() {
 			ApplicationEventListeningMessageProducer producer = new ApplicationEventListeningMessageProducer();
 			producer.setEventTypes(StompIntegrationEvent.class);

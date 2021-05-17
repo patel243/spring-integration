@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import org.springframework.data.annotation.AccessType;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.annotation.PersistenceConstructor;
 import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.util.Assert;
 
@@ -61,7 +62,9 @@ public class MessageDocument {
 
 	private Integer lastReleasedSequence = 0;
 
-	private int sequence;
+	private String condition;
+
+	private long sequence;
 
 	public MessageDocument(Message<?> message) {
 		this(message, message.getHeaders().getId());
@@ -139,7 +142,7 @@ public class MessageDocument {
 		this.lastReleasedSequence = lastReleasedSequence;
 	}
 
-	public void setSequence(int sequence) {
+	public void setSequence(long sequence) {
 		this.sequence = sequence;
 	}
 
@@ -151,7 +154,16 @@ public class MessageDocument {
 		return this.groupId;
 	}
 
-	public int getSequence() {
+	@Nullable
+	public String getCondition() {
+		return this.condition;
+	}
+
+	public void setCondition(String condition) {
+		this.condition = condition;
+	}
+
+	public long getSequence() {
 		return this.sequence;
 	}
 

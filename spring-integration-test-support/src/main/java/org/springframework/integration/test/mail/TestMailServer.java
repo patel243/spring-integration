@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 the original author or authors.
+ * Copyright 2014-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,8 +95,8 @@ public final class TestMailServer {
 				super(socket);
 			}
 
-			@Override
-			void doRun() {
+			@Override // NOSONAR
+			void doRun() { // NOSONAR
 				try {
 					write("220 foo SMTP");
 					while (!socket.isClosed()) {
@@ -177,37 +177,40 @@ public final class TestMailServer {
 				super(socket);
 			}
 
-			@Override
+			@Override // NOSONAR
 			void doRun() {
 				try {
 					write("+OK POP3");
 					while (!socket.isClosed()) {
 						String line = reader.readLine();
-						if ("CAPA".equals(line)) {
-							write(PLUS_OK);
-							write("USER");
-							write(".");
+						if (line == null) {
+							break;
 						}
-						else if ("USER user".equals(line)) {
-							write(PLUS_OK);
-						}
-						else if ("PASS pw".equals(line)) {
-							write(PLUS_OK);
-						}
-						else if ("STAT".equals(line)) {
-							write("+OK 1 3");
-						}
-						else if ("NOOP".equals(line)) {
-							write(PLUS_OK);
-						}
-						else if ("RETR 1".equals(line)) {
-							write(PLUS_OK);
-							write(MESSAGE);
-							write(".");
-						}
-						else if ("QUIT".equals(line)) {
-							write(PLUS_OK);
-							socket.close();
+						switch (line) {
+							case "CAPA":
+								write(PLUS_OK);
+								write("USER");
+								write(".");
+								break;
+							case "USER user":
+							case "PASS pw":
+							case "NOOP":
+								write(PLUS_OK);
+								break;
+							case "STAT":
+								write("+OK 1 3");
+								break;
+							case "RETR 1":
+								write(PLUS_OK);
+								write(MESSAGE);
+								write(".");
+								break;
+							case "QUIT":
+								write(PLUS_OK);
+								socket.close();
+								break;
+							default:
+								throw new UnsupportedOperationException(line);
 						}
 					}
 				}
@@ -251,7 +254,7 @@ public final class TestMailServer {
 			/**
 			 * Time to wait while IDLE before returning a result.
 			 */
-			private static final int IDLE_WAIT_TIME = 1000;
+			private static final int IDLE_WAIT_TIME = 500;
 
 			ImapHandler(Socket socket) {
 				super(socket);
@@ -484,11 +487,11 @@ public final class TestMailServer {
 
 			public static final String MESSAGE =
 					"To: Foo <foo@bar>\r\n"
-					+ "cc: a@b, c@d\r\n"
-					+ "bcc: e@f, g@h\r\n"
-					+ "From: Bar <bar@baz>\r\n"
-					+ "Subject: Test Email\r\n"
-					+ "\r\n" + BODY;
+							+ "cc: a@b, c@d\r\n"
+							+ "bcc: e@f, g@h\r\n"
+							+ "From: Bar <bar@baz>, Bar2 <bar2@baz>\r\n"
+							+ "Subject: Test Email\r\n"
+							+ "\r\n" + BODY;
 
 			protected final Socket socket; // NOSONAR protected
 
@@ -533,6 +536,7 @@ public final class TestMailServer {
 					// NOSONAR
 				}
 			}
+
 		}
 
 	}

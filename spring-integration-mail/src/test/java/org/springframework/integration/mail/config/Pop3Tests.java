@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Arrays;
 
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.integration.mail.MailHeaders;
 import org.springframework.integration.mail.MailReceivingMessageSource;
@@ -35,6 +35,8 @@ import org.springframework.messaging.MessageHeaders;
 
 /**
  * @author Gary Russell
+ * @author Artem Bilan
+ *
  * @since 5.0
  *
  */
@@ -42,7 +44,7 @@ public class Pop3Tests {
 
 	private static final Pop3Server pop3Server = TestMailServer.pop3(0);
 
-	@BeforeClass
+	@BeforeAll
 	public static void setup() throws InterruptedException {
 		int n = 0;
 		while (n++ < 100 && (!pop3Server.isListening())) {
@@ -51,13 +53,13 @@ public class Pop3Tests {
 		assertThat(n < 100).isTrue();
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void tearDown() {
 		pop3Server.stop();
 	}
 
 	@Test
-	public void testPop3() throws Exception {
+	public void testPop3() {
 		Pop3MailReceiver receiver = new Pop3MailReceiver("localhost", pop3Server.getPort(), "user", "pw");
 		receiver.setHeaderMapper(new DefaultMailHeaderMapper());
 		MailReceivingMessageSource source = new MailReceivingMessageSource(receiver);
@@ -67,7 +69,7 @@ public class Pop3Tests {
 		assertThat(headers.get(MailHeaders.TO, String[].class)[0]).isEqualTo("Foo <foo@bar>");
 		assertThat(Arrays.toString(headers.get(MailHeaders.CC, String[].class))).isEqualTo("[a@b, c@d]");
 		assertThat(Arrays.toString(headers.get(MailHeaders.BCC, String[].class))).isEqualTo("[e@f, g@h]");
-		assertThat(headers.get(MailHeaders.FROM)).isEqualTo("Bar <bar@baz>");
+		assertThat(headers.get(MailHeaders.FROM)).isEqualTo("Bar <bar@baz>,Bar2 <bar2@baz>");
 		assertThat(headers.get(MailHeaders.SUBJECT)).isEqualTo("Test Email");
 		assertThat(message.getPayload()).isEqualTo("foo\r\n\r\n");
 	}

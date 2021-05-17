@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2019 the original author or authors.
+ * Copyright 2016-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package org.springframework.integration.amqp.outbound;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.BDDMockito.willReturn;
@@ -29,14 +28,16 @@ import static org.mockito.Mockito.spy;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
-import org.apache.commons.logging.Log;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import org.springframework.amqp.core.AmqpReplyTimeoutException;
 import org.springframework.amqp.rabbit.AsyncRabbitTemplate;
 import org.springframework.amqp.rabbit.AsyncRabbitTemplate.RabbitMessageFuture;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.junit.RabbitAvailable;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
@@ -46,9 +47,11 @@ import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.BeanFactory;
+import org.springframework.core.log.LogAccessor;
 import org.springframework.integration.amqp.support.NackedAmqpMessageException;
 import org.springframework.integration.amqp.support.ReturnedAmqpMessageException;
 import org.springframework.integration.channel.DirectChannel;
+import org.springframework.integration.channel.NullChannel;
 import org.springframework.integration.channel.QueueChannel;
 import org.springframework.integration.support.MessageBuilder;
 import org.springframework.integration.test.condition.LogLevels;
@@ -102,14 +105,16 @@ class AsyncAmqpGatewayTests {
 		receiver.start();
 
 		AsyncAmqpOutboundGateway gateway = new AsyncAmqpOutboundGateway(asyncTemplate);
-		Log logger = spy(TestUtils.getPropertyValue(gateway, "logger", Log.class));
+		LogAccessor logger = spy(TestUtils.getPropertyValue(gateway, "logger", LogAccessor.class));
 		given(logger.isDebugEnabled()).willReturn(true);
 		final CountDownLatch replyTimeoutLatch = new CountDownLatch(1);
 		willAnswer(invocation -> {
 			invocation.callRealMethod();
 			replyTimeoutLatch.countDown();
 			return null;
-		}).given(logger).debug(startsWith("Reply not required and async timeout for"));
+		}).given(logger)
+				.debug(ArgumentMatchers.<Supplier<String>>argThat(logMessage ->
+						logMessage.get().startsWith("Reply not required and async timeout for")));
 		new DirectFieldAccessor(gateway).setPropertyValue("logger", logger);
 		QueueChannel outputChannel = new QueueChannel();
 		outputChannel.setBeanName("output");
@@ -217,6 +222,40 @@ class AsyncAmqpGatewayTests {
 
 		asyncTemplate.stop();
 		receiver.stop();
+		ccf.destroy();
+	}
+
+	@Test
+	void confirmsAndReturnsNoChannels() throws Exception {
+		CachingConnectionFactory ccf = new CachingConnectionFactory("localhost");
+		ccf.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.CORRELATED);
+		ccf.setPublisherReturns(true);
+		RabbitTemplate template = new RabbitTemplate(ccf);
+		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(ccf);
+		container.setBeanName("replyContainer");
+		container.setQueueNames("asyncRQ1");
+		container.afterPropertiesSet();
+		container.start();
+		AsyncRabbitTemplate asyncTemplate = new AsyncRabbitTemplate(template, container);
+		asyncTemplate.setEnableConfirms(true);
+		asyncTemplate.setMandatory(true);
+
+		AsyncAmqpOutboundGateway gateway = new AsyncAmqpOutboundGateway(asyncTemplate);
+		gateway.setOutputChannel(new NullChannel());
+		gateway.setExchangeName("");
+		gateway.setRoutingKey("noRoute");
+		gateway.setBeanFactory(mock(BeanFactory.class));
+		gateway.afterPropertiesSet();
+		gateway.start();
+
+		CorrelationData corr = new CorrelationData("foo");
+		gateway.handleMessage(MessageBuilder.withPayload("test")
+				.setHeader(AmqpHeaders.PUBLISH_CONFIRM_CORRELATION, corr)
+				.build());
+		assertThat(corr.getFuture().get(10, TimeUnit.SECONDS).isAck()).isTrue();
+		assertThat(corr.getReturned()).isNotNull();
+
+		asyncTemplate.stop();
 		ccf.destroy();
 	}
 

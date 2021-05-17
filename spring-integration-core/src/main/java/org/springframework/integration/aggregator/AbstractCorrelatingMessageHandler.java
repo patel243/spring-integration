@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2020 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package org.springframework.integration.aggregator;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -26,6 +27,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.locks.Lock;
+import java.util.function.BiFunction;
 
 import org.aopalliance.aop.Advice;
 
@@ -52,7 +54,9 @@ import org.springframework.integration.store.UniqueExpiryCallback;
 import org.springframework.integration.support.AbstractIntegrationMessageBuilder;
 import org.springframework.integration.support.locks.DefaultLockRegistry;
 import org.springframework.integration.support.locks.LockRegistry;
+import org.springframework.integration.support.management.ManageableLifecycle;
 import org.springframework.integration.util.UUIDConverter;
+import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
 import org.springframework.messaging.MessageDeliveryException;
@@ -82,6 +86,11 @@ import org.springframework.util.ObjectUtils;
  * Use proper {@link CorrelationStrategy} for cases when same
  * {@link org.springframework.integration.store.MessageStore} is used
  * for multiple handlers to ensure uniqueness of message groups across handlers.
+ * <p>
+ * When the {@link #expireTimeout} is greater than 0, groups which are older than this timeout
+ * are purged from the store on start up (or when {@link #purgeOrphanedGroups()} is called).
+ * If {@link #expireDuration} is provided, the task is scheduled to perform
+ * {@link #purgeOrphanedGroups()} periodically.
  *
  * @author Iwein Fuld
  * @author Dave Syer
@@ -96,7 +105,7 @@ import org.springframework.util.ObjectUtils;
  * @since 2.0
  */
 public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageProducingHandler
-		implements DiscardingMessageHandler, ApplicationEventPublisherAware, Lifecycle {
+		implements DiscardingMessageHandler, ApplicationEventPublisherAware, ManageableLifecycle {
 
 	private final Comparator<Message<?>> sequenceNumberComparator = new MessageSequenceComparator();
 
@@ -132,6 +141,10 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 
 	private List<Advice> forceReleaseAdviceChain;
 
+	private long expireTimeout;
+
+	private Duration expireDuration;
+
 	private MessageGroupProcessor forceReleaseProcessor = new ForceReleaseMessageGroupProcessor();
 
 	private EvaluationContext evaluationContext;
@@ -145,6 +158,8 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 	private boolean releaseLockBeforeSend;
 
 	private volatile boolean running;
+
+	private BiFunction<Message<?>, String, String> groupConditionSupplier;
 
 	public AbstractCorrelatingMessageHandler(MessageGroupProcessor processor, MessageGroupStore store,
 			CorrelationStrategy correlationStrategy, ReleaseStrategy releaseStrategy) {
@@ -310,6 +325,56 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 		this.releaseLockBeforeSend = releaseLockBeforeSend;
 	}
 
+	/**
+	 * Configure a timeout in milliseconds for purging old orphaned groups from the store.
+	 * Used on startup and when an {@link #expireDuration} is provided, the task for running
+	 * {@link #purgeOrphanedGroups()} is scheduled with that period.
+	 * The {@link #forceReleaseProcessor} is used to process those expired groups according
+	 * the "force complete" options. A group can be orphaned if a persistent message group
+	 * store is used and no new messages arrive for that group after a restart.
+	 * @param expireTimeout the number of milliseconds to determine old orphaned groups in the store to purge.
+	 * @since 5.4
+	 * @see #purgeOrphanedGroups()
+	 */
+	public void setExpireTimeout(long expireTimeout) {
+		Assert.isTrue(expireTimeout > 0, "'expireTimeout' must be more than 0.");
+		this.expireTimeout = expireTimeout;
+	}
+
+	/**
+	 * Configure a {@link Duration} (in millis) how often to clean up old orphaned groups from the store.
+	 * @param expireDuration the delay how often to call {@link #purgeOrphanedGroups()}.
+	 * @since 5.4
+	 * @see #purgeOrphanedGroups()
+	 * @see #setExpireDuration(Duration)
+	 * @see #setExpireTimeout(long)
+	 */
+	public void setExpireDurationMillis(long expireDuration) {
+		setExpireDuration(Duration.ofMillis(expireDuration));
+	}
+
+	/**
+	 * Configure a {@link Duration} how often to clean up old orphaned groups from the store.
+	 * @param expireDuration the delay how often to call {@link #purgeOrphanedGroups()}.
+	 * @since 5.4
+	 * @see #purgeOrphanedGroups()
+	 * @see #setExpireTimeout(long)
+	 */
+	public void setExpireDuration(@Nullable Duration expireDuration) {
+		this.expireDuration = expireDuration;
+	}
+
+	/**
+	 * Configure a {@link BiFunction} to supply a group condition from a message to be added to the group.
+	 * The {@code null} result from the function will reset a condition set before.
+	 * @param conditionSupplier the function to supply a group condition from a message to be added to the group.
+	 * @since 5.5
+	 * @see GroupConditionProvider
+	 */
+	public void setGroupConditionSupplier(BiFunction<Message<?>, String, String> conditionSupplier) {
+		this.groupConditionSupplier = conditionSupplier;
+	}
+
 	@Override
 	public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
 		this.applicationEventPublisher = applicationEventPublisher;
@@ -356,6 +421,10 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 		 */
 		this.lockRegistrySet = true;
 		this.forceReleaseProcessor = createGroupTimeoutProcessor();
+
+		if (this.releaseStrategy instanceof GroupConditionProvider) {
+			this.groupConditionSupplier = ((GroupConditionProvider) this.releaseStrategy).getGroupConditionSupplier();
+		}
 	}
 
 	private MessageGroupProcessor createGroupTimeoutProcessor() {
@@ -388,6 +457,11 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 
 	protected ReleaseStrategy getReleaseStrategy() {
 		return this.releaseStrategy;
+	}
+
+	@Nullable
+	protected BiFunction<Message<?>, String, String> getGroupConditionSupplier() {
+		return this.groupConditionSupplier;
 	}
 
 	@Override
@@ -455,9 +529,7 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 		Assert.state(correlationKey != null,
 				"Null correlation not allowed.  Maybe the CorrelationStrategy is failing?");
 
-		if (this.logger.isDebugEnabled()) {
-			this.logger.debug("Handling message with correlationKey [" + correlationKey + "]: " + message);
-		}
+		this.logger.debug(() -> "Handling message with correlationKey [" + correlationKey + "]: " + message);
 
 		UUID groupIdUuid = UUIDConverter.getUUID(correlationKey);
 		Lock lock = this.lockRegistry.obtain(groupIdUuid.toString());
@@ -489,10 +561,11 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 		}
 
 		if (!messageGroup.isComplete() && messageGroup.canAdd(message)) {
-			if (this.logger.isTraceEnabled()) {
-				this.logger.trace("Adding message to group [ " + messageGroup + "]");
-			}
+			MessageGroup messageGroupToLog = messageGroup;
+			this.logger.trace(() -> "Adding message to group [ " + messageGroupToLog + "]");
 			messageGroup = store(correlationKey, message);
+
+			setGroupConditionIfAny(message, messageGroup);
 
 			if (this.releaseStrategy.canRelease(messageGroup)) {
 				Collection<Message<?>> completedMessages = null;
@@ -524,10 +597,18 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 		ScheduledFuture<?> scheduledFuture = this.expireGroupScheduledFutures.remove(groupIdUuid);
 		if (scheduledFuture != null) {
 			boolean canceled = scheduledFuture.cancel(mayInterruptIfRunning);
-			if (canceled && this.logger.isDebugEnabled()) {
-				this.logger.debug("Cancel 'ScheduledFuture' for MessageGroup with Correlation Key [ "
-						+ correlationKey + "].");
+			if (canceled) {
+				this.logger.debug(() ->
+						"Cancel 'ScheduledFuture' for MessageGroup with Correlation Key [ " + correlationKey + "].");
 			}
+		}
+	}
+
+	private void setGroupConditionIfAny(Message<?> message, MessageGroup messageGroup) {
+		if (this.groupConditionSupplier != null) {
+			String condition = this.groupConditionSupplier.apply(message, messageGroup.getCondition());
+			this.messageStore.setGroupCondition(messageGroup.getGroupId(), condition);
+			messageGroup.setCondition(condition);
 		}
 	}
 
@@ -556,9 +637,7 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 											groupNow.getLastModified()
 													<= (System.currentTimeMillis() - this.minimumTimeoutForEmptyGroups);
 									if (removeGroup) {
-										if (this.logger.isDebugEnabled()) {
-											this.logger.debug("Removing empty group: " + groupUuid);
-										}
+										this.logger.debug(() -> "Removing empty group: " + groupUuid);
 										remove(messageGroup);
 									}
 								}
@@ -568,50 +647,51 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 							}
 							catch (InterruptedException e) {
 								Thread.currentThread().interrupt();
-								if (this.logger.isDebugEnabled()) {
-									this.logger.debug("Thread was interrupted while trying to obtain lock."
-											+ "Rescheduling empty MessageGroup [ " + groupId + "] for removal.");
-								}
+								this.logger.debug(() -> "Thread was interrupted while trying to obtain lock."
+										+ "Rescheduling empty MessageGroup [ " + groupId + "] for removal.");
 								removeEmptyGroupAfterTimeout(messageGroup, timeout);
 							}
 
 						}, new Date(System.currentTimeMillis() + timeout));
 
-		if (this.logger.isDebugEnabled()) {
-			this.logger.debug("Schedule empty MessageGroup [ " + groupId + "] for removal.");
-		}
+		this.logger.debug(() -> "Schedule empty MessageGroup [ " + groupId + "] for removal.");
 		this.expireGroupScheduledFutures.put(groupUuid, scheduledFuture);
 	}
 
 	private void scheduleGroupToForceComplete(MessageGroup messageGroup) {
-		final Long groupTimeout = obtainGroupTimeout(messageGroup);
+		Object groupTimeout = obtainGroupTimeout(messageGroup);
 		/*
 		 * When 'groupTimeout' is evaluated to 'null' we do nothing.
 		 * The 'MessageGroupStoreReaper' can be used to 'forceComplete' message groups.
 		 */
 		if (groupTimeout != null) {
-			if (groupTimeout > 0) {
-				final Object groupId = messageGroup.getGroupId();
-				final long timestamp = messageGroup.getTimestamp();
-				final long lastModified = messageGroup.getLastModified();
+			Date startTime = null;
+			if (groupTimeout instanceof Date) {
+				startTime = (Date) groupTimeout;
+			}
+			else if ((Long) groupTimeout > 0) {
+				startTime = new Date(System.currentTimeMillis() + (Long) groupTimeout);
+			}
+
+			if (startTime != null) {
+				Object groupId = messageGroup.getGroupId();
+				long timestamp = messageGroup.getTimestamp();
+				long lastModified = messageGroup.getLastModified();
 				ScheduledFuture<?> scheduledFuture =
 						getTaskScheduler()
 								.schedule(() -> {
 									try {
 										processForceRelease(groupId, timestamp, lastModified);
 									}
-									catch (MessageDeliveryException e) {
-										if (AbstractCorrelatingMessageHandler.this.logger.isWarnEnabled()) {
-											AbstractCorrelatingMessageHandler.this.logger.warn("The MessageGroup ["
-													+ groupId + "] is rescheduled by the reason of:", e);
-										}
+									catch (MessageDeliveryException ex) {
+											logger.warn(ex, () ->
+													"The MessageGroup [" + groupId +
+															"] is rescheduled by the reason of: ");
 										scheduleGroupToForceComplete(groupId);
 									}
-								}, new Date(System.currentTimeMillis() + groupTimeout));
+								}, startTime);
 
-				if (this.logger.isDebugEnabled()) {
-					this.logger.debug("Schedule MessageGroup [ " + messageGroup + "] to 'forceComplete'.");
-				}
+				this.logger.debug(() -> "Schedule MessageGroup [ " + messageGroup + "] to 'forceComplete'.");
 				this.expireGroupScheduledFutures.put(UUIDConverter.getUUID(groupId), scheduledFuture);
 			}
 			else {
@@ -723,26 +803,22 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 						 */
 						removeGroup =
 								lastModifiedNow <= (System.currentTimeMillis() - this.minimumTimeoutForEmptyGroups);
-						if (removeGroup && this.logger.isDebugEnabled()) {
-							this.logger.debug("Removing empty group: " + correlationKey);
+						if (removeGroup) {
+							this.logger.debug(() -> "Removing empty group: " + correlationKey);
 						}
 					}
 				}
 				else {
 					removeGroup = false;
-					if (this.logger.isDebugEnabled()) {
-						this.logger.debug("Group expiry candidate (" + correlationKey +
-								") has changed - it may be reconsidered for a future expiration");
-					}
+					this.logger.debug(() -> "Group expiry candidate (" + correlationKey +
+							") has changed - it may be reconsidered for a future expiration");
 				}
 			}
 			catch (MessageDeliveryException e) {
 				removeGroup = false;
-				if (this.logger.isDebugEnabled()) {
-					this.logger.debug("Group expiry candidate (" + correlationKey +
-							") has been affected by MessageDeliveryException - " +
-							"it may be reconsidered for a future expiration one more time");
-				}
+				this.logger.debug(() -> "Group expiry candidate (" + correlationKey +
+						") has been affected by MessageDeliveryException - " +
+						"it may be reconsidered for a future expiration one more time");
 				throw e;
 			}
 			finally {
@@ -781,22 +857,16 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 	}
 
 	protected void expireGroup(Object correlationKey, MessageGroup group, Lock lock) {
-		if (this.logger.isInfoEnabled()) {
-			this.logger.info("Expiring MessageGroup with correlationKey[" + correlationKey + "]");
-		}
+		this.logger.info(() -> "Expiring MessageGroup with correlationKey[" + correlationKey + "]");
 		if (this.sendPartialResultOnExpiry) {
-			if (this.logger.isDebugEnabled()) {
-				this.logger.debug("Prematurely releasing partially complete group with key ["
-						+ correlationKey + "] to: " + getOutputChannel());
-			}
+			this.logger.debug(() -> "Prematurely releasing partially complete group with key ["
+					+ correlationKey + "] to: " + getOutputChannel());
 			completeGroup(correlationKey, group, lock);
 		}
 		else {
-			if (this.logger.isDebugEnabled()) {
-				this.logger.debug("Discarding messages of partially complete group with key ["
-						+ correlationKey + "] to: "
-						+ (this.discardChannelName != null ? this.discardChannelName : this.discardChannel));
-			}
+			this.logger.debug(() -> "Discarding messages of partially complete group with key ["
+					+ correlationKey + "] to: "
+					+ (this.discardChannelName != null ? this.discardChannelName : this.discardChannel));
 			if (this.releaseLockBeforeSend) {
 				lock.unlock();
 			}
@@ -825,9 +895,7 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 		Collection<Message<?>> partialSequence = null;
 		Object result;
 		try {
-			if (this.logger.isDebugEnabled()) {
-				this.logger.debug("Completing group with correlationKey [" + correlationKey + "]");
-			}
+			this.logger.debug(() -> "Completing group with correlationKey [" + correlationKey + "]");
 
 			result = this.outputProcessor.processMessageGroup(group);
 			if (result instanceof Collection<?>) {
@@ -843,13 +911,13 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 				else if (!(result instanceof Message<?>)) {
 					messageBuilder =
 							getMessageBuilderFactory()
-							.withPayload(result)
-							.copyHeaders(message.getHeaders());
+									.withPayload(result)
+									.copyHeaders(message.getHeaders());
 				}
 				else if (compareSequences((Message<?>) result, message)) {
 					messageBuilder =
 							getMessageBuilderFactory()
-							.fromMessage((Message<?>) result);
+									.fromMessage((Message<?>) result);
 				}
 				result = messageBuilder != null ? messageBuilder.popSequenceDetails() : result;
 			}
@@ -872,13 +940,26 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 
 	protected void verifyResultCollectionConsistsOfMessages(Collection<?> elements) {
 		Class<?> commonElementType = CollectionUtils.findCommonElementType(elements);
-		Assert.isAssignable(Message.class, commonElementType,
+		Assert.isAssignable(Message.class, commonElementType, () ->
 				"The expected collection of Messages contains non-Message element: " + commonElementType);
 	}
 
-	protected Long obtainGroupTimeout(MessageGroup group) {
-		return this.groupTimeoutExpression != null
-				? this.groupTimeoutExpression.getValue(this.evaluationContext, group, Long.class) : null;
+	protected Object obtainGroupTimeout(MessageGroup group) {
+		if (this.groupTimeoutExpression != null) {
+			Object timeout = this.groupTimeoutExpression.getValue(this.evaluationContext, group);
+			if (timeout instanceof Date) {
+				return timeout;
+			}
+			else if (timeout != null) {
+				try {
+					return Long.parseLong(timeout.toString());
+				}
+				catch (NumberFormatException ex) {
+					throw new IllegalStateException("Error evaluating 'groupTimeoutExpression'", ex);
+				}
+			}
+		}
+		return null;
 	}
 
 	@Override
@@ -895,6 +976,13 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 			}
 			if (this.releaseStrategy instanceof Lifecycle) {
 				((Lifecycle) this.releaseStrategy).start();
+			}
+			if (this.expireTimeout > 0) {
+				purgeOrphanedGroups();
+				if (this.expireDuration != null) {
+					getTaskScheduler()
+							.scheduleWithFixedDelay(this::purgeOrphanedGroups, this.expireDuration);
+				}
 			}
 		}
 	}
@@ -915,6 +1003,17 @@ public abstract class AbstractCorrelatingMessageHandler extends AbstractMessageP
 	@Override
 	public boolean isRunning() {
 		return this.running;
+	}
+
+	/**
+	 * Perform a {@link MessageGroupStore#expireMessageGroups(long)} with the provided {@link #expireTimeout}.
+	 * Can be called externally at any time.
+	 * Internally it is called from the scheduled task with the configured {@link #expireDuration}.
+	 * @since 5.4
+	 */
+	public void purgeOrphanedGroups() {
+		Assert.isTrue(this.expireTimeout > 0, "'expireTimeout' must be more than 0.");
+		this.messageStore.expireMessageGroups(this.expireTimeout);
 	}
 
 	protected static class SequenceAwareMessageGroup extends SimpleMessageGroup {

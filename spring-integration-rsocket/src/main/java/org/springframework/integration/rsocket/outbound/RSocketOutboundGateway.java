@@ -22,6 +22,7 @@ import java.util.Map;
 import org.reactivestreams.Publisher;
 
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.core.ResolvableType;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
 import org.springframework.integration.expression.ExpressionUtils;
@@ -38,6 +39,7 @@ import org.springframework.util.ClassUtils;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.MimeType;
 
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 /**
@@ -89,7 +91,7 @@ public class RSocketOutboundGateway extends AbstractReplyProducingMessageHandler
 	private EvaluationContext evaluationContext;
 
 	@Nullable
-	private Mono<RSocketRequester> rsocketRequesterMono;
+	private RSocketRequester rsocketRequester;
 
 	/**
 	 * Instantiate based on the provided RSocket endpoint {@code route}
@@ -120,7 +122,7 @@ public class RSocketOutboundGateway extends AbstractReplyProducingMessageHandler
 
 	/**
 	 * Configure a {@link ClientRSocketConnector} for client side requests based on the connection
-	 * provided by the {@link ClientRSocketConnector#getRSocketRequester()}.
+	 * provided by the {@link ClientRSocketConnector#getRequester()}.
 	 * In case of server side, an {@link RSocketRequester} must be provided in the
 	 * {@link RSocketRequesterMethodArgumentResolver#RSOCKET_REQUESTER_HEADER} header of request message.
 	 * @param clientRSocketConnector the {@link ClientRSocketConnector} to use.
@@ -207,27 +209,24 @@ public class RSocketOutboundGateway extends AbstractReplyProducingMessageHandler
 		super.doInit();
 		this.evaluationContext = ExpressionUtils.createStandardEvaluationContext(getBeanFactory());
 		if (this.clientRSocketConnector != null) {
-			this.rsocketRequesterMono = this.clientRSocketConnector.getRSocketRequester();
+			this.rsocketRequester = this.clientRSocketConnector.getRequester();
 		}
 	}
 
 	@Override
 	protected Object handleRequestMessage(Message<?> requestMessage) {
-		RSocketRequester rsocketRequester = requestMessage.getHeaders()
-				.get(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, RSocketRequester.class);
-		Mono<RSocketRequester> requesterMono;
-		if (rsocketRequester != null) {
-			requesterMono = Mono.just(rsocketRequester);
-		}
-		else {
-			requesterMono = this.rsocketRequesterMono;
+		RSocketRequester requester =
+				requestMessage.getHeaders()
+						.get(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, RSocketRequester.class);
+		if (requester == null) {
+			requester = this.rsocketRequester;
 		}
 
-		Assert.notNull(requesterMono,
+		Assert.notNull(requester,
 				() -> "The 'RSocketRequester' must be configured via 'ClientRSocketConnector' or provided in the '" +
 						RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER + "' request message headers.");
 
-		return requesterMono
+		return Mono.just(requester)
 				.map((rSocketRequester) -> createRequestSpec(rSocketRequester, requestMessage))
 				.map((requestSpec) -> prepareRetrieveSpec(requestSpec, requestMessage))
 				.flatMap((retrieveSpec) -> performRetrieve(retrieveSpec, requestMessage));
@@ -301,12 +300,17 @@ public class RSocketOutboundGateway extends AbstractReplyProducingMessageHandler
 				}
 			case requestStream:
 			case requestChannel:
+				Flux<?> result;
+				ResolvableType expectedType;
 				if (expectedResponseType instanceof Class<?>) {
-					return Mono.just(retrieveSpec.retrieveFlux((Class<?>) expectedResponseType));
+					expectedType = ResolvableType.forClass((Class<?>) expectedResponseType);
+					result = retrieveSpec.retrieveFlux((Class<?>) expectedResponseType);
 				}
 				else {
-					return Mono.just(retrieveSpec.retrieveFlux((ParameterizedTypeReference<?>) expectedResponseType));
+					expectedType = ResolvableType.forType((ParameterizedTypeReference<?>) expectedResponseType);
+					result = retrieveSpec.retrieveFlux((ParameterizedTypeReference<?>) expectedResponseType);
 				}
+				return isVoid(expectedType) ? result.then() : Mono.just(result);
 			default:
 				throw new UnsupportedOperationException("Unsupported interaction model: " + interactionModel);
 		}
@@ -347,6 +351,10 @@ public class RSocketOutboundGateway extends AbstractReplyProducingMessageHandler
 		else {
 			return type;
 		}
+	}
+
+	private static boolean isVoid(ResolvableType type) {
+		return (Void.class.equals(type.resolve()) || void.class.equals(type.resolve()));
 	}
 
 }

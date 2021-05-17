@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 the original author or authors.
+ * Copyright 2018-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,12 +24,14 @@ import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.support.BeanDefinitionBuilder;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.integration.annotation.EndpointId;
+import org.springframework.integration.annotation.Gateway;
 import org.springframework.integration.annotation.ServiceActivator;
 import org.springframework.integration.channel.AbstractMessageChannel;
 import org.springframework.integration.channel.AbstractPollableChannel;
@@ -39,7 +41,11 @@ import org.springframework.integration.channel.QueueChannel;
 import org.springframework.integration.config.EnableIntegration;
 import org.springframework.integration.config.EnableIntegrationManagement;
 import org.springframework.integration.core.MessageSource;
+import org.springframework.integration.dsl.IntegrationFlow;
+import org.springframework.integration.dsl.IntegrationFlows;
 import org.springframework.integration.endpoint.AbstractMessageSource;
+import org.springframework.integration.gateway.GatewayProxyFactoryBean;
+import org.springframework.integration.gateway.MessagingGatewaySupport;
 import org.springframework.integration.handler.AbstractReplyProducingMessageHandler;
 import org.springframework.integration.test.util.TestUtils;
 import org.springframework.messaging.Message;
@@ -53,6 +59,7 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.test.context.support.DependencyInjectionTestExecutionListener;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.search.MeterNotFoundException;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
@@ -87,14 +94,24 @@ public class MicrometerMetricsTests {
 	private QueueChannel queue;
 
 	@Autowired
+	private QueueChannel noMeters;
+
+	@Autowired
 	private PollableChannel badPoll;
 
 	@Autowired
 	private NullChannel nullChannel;
 
+	@Autowired
+	private Gate gates;
+
+	@Autowired
+	@Qualifier("gatesFlow.gateway")
+	private Gate gatesFlow;
+
 	@SuppressWarnings("unchecked")
 	@Test
-	public void testSend() {
+	public void testMicrometerMetrics() {
 		GenericMessage<String> message = new GenericMessage<>("foo");
 		this.channel.send(message);
 		assertThatExceptionOfType(MessagingException.class)
@@ -118,8 +135,8 @@ public class MicrometerMetricsTests {
 
 		nullChannel.send(message);
 		MeterRegistry registry = this.meterRegistry;
-		assertThat(registry.get("spring.integration.channels").gauge().value()).isEqualTo(6);
-		assertThat(registry.get("spring.integration.handlers").gauge().value()).isEqualTo(3);
+		assertThat(registry.get("spring.integration.channels").gauge().value()).isEqualTo(8);
+		assertThat(registry.get("spring.integration.handlers").gauge().value()).isEqualTo(4);
 		assertThat(registry.get("spring.integration.sources").gauge().value()).isEqualTo(1);
 
 		assertThat(registry.get("spring.integration.receive")
@@ -162,10 +179,20 @@ public class MicrometerMetricsTests {
 				.tag("result", "success")
 				.counter().count()).isEqualTo(1);
 
+		this.queue.send(message);
+
+		assertThat(registry.get("spring.integration.channel.queue.size")
+				.tag("name", "queue")
+				.gauge().value()).isEqualTo(2d);
+
+		assertThat(registry.get("spring.integration.channel.queue.remaining.capacity")
+				.tag("name", "queue")
+				.gauge().value()).isEqualTo(8d);
+
 		assertThat(registry.get("spring.integration.send")
 				.tag("name", "nullChannel")
 				.tag("result", "success")
-				.timer().count()).isEqualTo(1);
+				.timer().count()).isEqualTo(3);
 
 		BeanDefinitionRegistry beanFactory = (BeanDefinitionRegistry) this.context.getBeanFactory();
 		beanFactory.registerBeanDefinition("newChannel",
@@ -195,6 +222,38 @@ public class MicrometerMetricsTests {
 				.withStackTraceContaining("A meter with name 'spring.integration.send' was found")
 				.withStackTraceContaining("No meters have a tag 'name' with value 'newChannel'");
 
+		this.gates.oneWay("foo");
+		this.gates.twoWay("bar");
+		assertThat(registry.get("spring.integration.send")
+				.tag("name", "gates#oneWay(String)")
+				.tag("result", "success")
+				.timer().count()).isEqualTo(1);
+		assertThat(registry.get("spring.integration.send")
+				.tag("name", "gates#twoWay(String)")
+				.tag("result", "success")
+				.timer().count()).isEqualTo(1);
+		this.gatesFlow.oneWay("foo");
+		this.gatesFlow.twoWay("bar");
+		assertThat(registry.get("spring.integration.send")
+				.tag("name", "gatesFlow.gateway#oneWay(String)")
+				.tag("result", "success")
+				.timer().count()).isEqualTo(1);
+		assertThat(registry.get("spring.integration.send")
+				.tag("name", "gatesFlow.gateway#twoWay(String)")
+				.tag("result", "success")
+				.timer().count()).isEqualTo(1);
+		assertThat(registry.get("spring.integration.send")
+				.tag("name", "customGw")
+				.tag("result", "success")
+				.timer().count()).isEqualTo(2);
+
+		this.noMeters.send(message);
+		assertThatExceptionOfType(MeterNotFoundException.class).isThrownBy(() -> registry.get("spring.integration.send")
+				.tag("type", "channel")
+				.tag("name", "noMeters")
+				.tag("result", "success")
+				.timer().count());
+
 		this.context.close();
 
 		assertThatExceptionOfType(MeterNotFoundException.class)
@@ -207,7 +266,6 @@ public class MicrometerMetricsTests {
 
 		this.channel.destroy();
 		assertThat(TestUtils.getPropertyValue(this.channel, "meters", Set.class)).hasSize(0);
-
 	}
 
 	@Configuration
@@ -216,8 +274,12 @@ public class MicrometerMetricsTests {
 	public static class Config {
 
 		@Bean
-		public MeterRegistry meterRegistry() {
-			return new SimpleMeterRegistry();
+		public static MeterRegistry meterRegistry() {
+			SimpleMeterRegistry registry = new SimpleMeterRegistry();
+			registry.config().meterFilter(MeterFilter.deny(id ->
+					"channel".equals(id.getTag("type")) &&
+					"noMeters".equals(id.getTag("name"))));
+			return registry;
 		}
 
 		@ServiceActivator(inputChannel = "channel")
@@ -260,7 +322,12 @@ public class MicrometerMetricsTests {
 
 		@Bean
 		public QueueChannel queue() {
-			return new QueueChannel();
+			return new QueueChannel(10);
+		}
+
+		@Bean
+		public QueueChannel noMeters() {
+			return new QueueChannel(10);
 		}
 
 		@Bean
@@ -278,6 +345,48 @@ public class MicrometerMetricsTests {
 				}
 			};
 		}
+
+		@Bean
+		public GatewayProxyFactoryBean gates() {
+			GatewayProxyFactoryBean gpfb = new GatewayProxyFactoryBean(Gate.class);
+			gpfb.setDefaultRequestChannelName("nullChannel");
+			return gpfb;
+		}
+
+		@Bean
+		IntegrationFlow gatesFlow() {
+			return IntegrationFlows.from(Gate.class)
+					.nullChannel();
+		}
+
+		@Bean
+		MessagingGatewaySupport customGw(NullChannel nullChannel) {
+			return new MessagingGatewaySupport() {
+
+				@Override
+				protected void onInit() {
+					setRequestChannel(nullChannel);
+					setReplyTimeout(0L);
+					super.onInit();
+				}
+
+				@Override
+				protected void doStart() {
+					send("foo");
+					sendAndReceive("bar");
+				}
+
+			};
+		}
+
+	}
+
+	public interface Gate {
+
+		void oneWay(String in);
+
+		@Gateway(replyTimeout = 0)
+		String twoWay(String in);
 
 	}
 

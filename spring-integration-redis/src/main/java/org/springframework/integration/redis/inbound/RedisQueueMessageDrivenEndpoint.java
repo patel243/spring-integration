@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2019 the original author or authors.
+ * Copyright 2013-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -81,8 +81,6 @@ public class RedisQueueMessageDrivenEndpoint extends MessageProducerSupport
 	private long recoveryInterval = DEFAULT_RECOVERY_INTERVAL;
 
 	private boolean rightPop = true;
-
-	private volatile boolean active;
 
 	private volatile boolean listening;
 
@@ -241,16 +239,17 @@ public class RedisQueueMessageDrivenEndpoint extends MessageProducerSupport
 				value = this.boundListOperations.leftPop(this.receiveTimeout, TimeUnit.MILLISECONDS);
 			}
 		}
-		catch (Exception e) {
+		catch (Exception ex) {
 			this.listening = false;
-			if (this.active) {
-				logger.error("Failed to execute listening task. Will attempt to resubmit in " + this.recoveryInterval
-						+ " milliseconds.", e);
-				publishException(e);
+			if (isActive()) {
+				logger.error(ex,
+						"Failed to execute listening task. Will attempt to resubmit in " + this.recoveryInterval
+								+ " milliseconds.");
+				publishException(ex);
 				sleepBeforeRecoveryAttempt();
 			}
 			else {
-				logger.debug("Failed to execute listening task. " + e.getClass() + ": " + e.getMessage());
+				logger.debug(() -> "Failed to execute listening task. " + ex.getClass() + ": " + ex.getMessage());
 			}
 		}
 		return value;
@@ -258,10 +257,7 @@ public class RedisQueueMessageDrivenEndpoint extends MessageProducerSupport
 
 	@Override
 	protected void doStart() {
-		if (!this.active) {
-			this.active = true;
-			this.restart();
-		}
+		restart();
 	}
 
 	/**
@@ -285,9 +281,7 @@ public class RedisQueueMessageDrivenEndpoint extends MessageProducerSupport
 			this.applicationEventPublisher.publishEvent(new RedisExceptionEvent(this, e));
 		}
 		else {
-			if (logger.isDebugEnabled()) {
-				logger.debug("No application event publisher for exception: " + e.getMessage());
-			}
+			logger.debug(() -> "No application event publisher for exception: " + e.getMessage());
 		}
 	}
 
@@ -304,7 +298,6 @@ public class RedisQueueMessageDrivenEndpoint extends MessageProducerSupport
 	@Override
 	protected void doStop() {
 		super.doStop();
-		this.active = false;
 		this.listening = false;
 	}
 
@@ -346,14 +339,14 @@ public class RedisQueueMessageDrivenEndpoint extends MessageProducerSupport
 		@Override
 		public void run() {
 			try {
-				while (RedisQueueMessageDrivenEndpoint.this.active) {
+				while (isActive()) {
 					RedisQueueMessageDrivenEndpoint.this.listening = true;
-					RedisQueueMessageDrivenEndpoint.this.popMessageAndSend();
+					popMessageAndSend();
 				}
 			}
 			finally {
-				if (RedisQueueMessageDrivenEndpoint.this.active) {
-					RedisQueueMessageDrivenEndpoint.this.restart();
+				if (isActive()) {
+					restart();
 				}
 				else if (RedisQueueMessageDrivenEndpoint.this.stopCallback != null) {
 					RedisQueueMessageDrivenEndpoint.this.stopCallback.run();

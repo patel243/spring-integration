@@ -30,10 +30,8 @@ import java.util.function.Supplier;
 
 import javax.sql.DataSource;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.core.log.LogAccessor;
 import org.springframework.core.serializer.Deserializer;
 import org.springframework.core.serializer.Serializer;
 import org.springframework.core.serializer.support.SerializingConverter;
@@ -45,7 +43,7 @@ import org.springframework.integration.store.MessageGroup;
 import org.springframework.integration.store.MessageGroupFactory;
 import org.springframework.integration.store.PriorityCapableChannelMessageStore;
 import org.springframework.integration.store.SimpleMessageGroupFactory;
-import org.springframework.integration.support.converter.WhiteListDeserializingConverter;
+import org.springframework.integration.support.converter.AllowListDeserializingConverter;
 import org.springframework.integration.util.UUIDConverter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -88,7 +86,7 @@ import org.springframework.util.StringUtils;
 @ManagedResource
 public class JdbcChannelMessageStore implements PriorityCapableChannelMessageStore, InitializingBean {
 
-	private static final Log logger = LogFactory.getLog(JdbcChannelMessageStore.class);
+	private static final LogAccessor LOGGER = new LogAccessor(JdbcChannelMessageStore.class);
 
 	/**
 	 * Default region property, used to partition the message store. For example,
@@ -130,7 +128,7 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 
 	private JdbcTemplate jdbcTemplate;
 
-	private WhiteListDeserializingConverter deserializer;
+	private AllowListDeserializingConverter deserializer;
 
 	private SerializingConverter serializer;
 
@@ -152,7 +150,7 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	 * Convenient constructor for configuration use.
 	 */
 	public JdbcChannelMessageStore() {
-		this.deserializer = new WhiteListDeserializingConverter();
+		this.deserializer = new AllowListDeserializingConverter();
 		this.serializer = new SerializingConverter();
 	}
 
@@ -190,7 +188,7 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	 */
 	@SuppressWarnings({ "unchecked", "rawtypes" })
 	public void setDeserializer(Deserializer<? extends Message<?>> deserializer) {
-		this.deserializer = new WhiteListDeserializingConverter((Deserializer) deserializer);
+		this.deserializer = new AllowListDeserializingConverter((Deserializer) deserializer);
 	}
 
 	/**
@@ -198,10 +196,10 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	 * be fully qualified or a wildcard '*' is allowed at the beginning or end of the
 	 * class name. Examples: {@code com.foo.*}, {@code *.MyClass}.
 	 * @param patterns the patterns.
-	 * @since 4.2.13
+	 * @since 5.4
 	 */
-	public void addWhiteListPatterns(String... patterns) {
-		this.deserializer.addWhiteListPatterns(patterns);
+	public void addAllowedPatterns(String... patterns) {
+		this.deserializer.addAllowedPatterns(patterns);
 	}
 
 	/**
@@ -386,8 +384,8 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 			this.messageRowMapper = new MessageRowMapper(this.deserializer, this.lobHandler);
 		}
 
-		if (this.jdbcTemplate.getFetchSize() != 1 && logger.isWarnEnabled()) {
-			logger.warn("The jdbcTemplate's fetch size is not 1. This may cause FIFO issues with Oracle databases.");
+		if (this.jdbcTemplate.getFetchSize() != 1 && LOGGER.isWarnEnabled()) {
+			LOGGER.warn("The jdbcTemplate's fetch size is not 1. This may cause FIFO issues with Oracle databases.");
 		}
 
 		if (this.preparedStatementSetter == null) {
@@ -408,15 +406,14 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	public MessageGroup addMessageToGroup(Object groupId, final Message<?> message) {
 		try {
 			this.jdbcTemplate.update(getQuery(Query.CREATE_MESSAGE,
-						() -> this.channelMessageStoreQueryProvider.getCreateMessageQuery()),
+					() -> this.channelMessageStoreQueryProvider.getCreateMessageQuery()),
 					ps -> this.preparedStatementSetter.setValues(ps, message, groupId, this.region,
 							this.priorityEnabled));
 		}
 		catch (@SuppressWarnings("unused") DuplicateKeyException e) {
-			if (logger.isDebugEnabled()) {
-				String messageId = getKey(message.getHeaders().getId());
-				logger.debug("The Message with id [" + messageId + "] already exists.\nIgnoring INSERT...");
-			}
+			LOGGER.debug(() ->
+					"The Message with id [" + getKey(message.getHeaders().getId()) + "] already exists.\n" +
+							"Ignoring INSERT...");
 		}
 		return getMessageGroup(groupId);
 	}
@@ -483,9 +480,9 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	@Override
 	public void removeMessageGroup(Object groupId) {
 		this.jdbcTemplate.update(
-				this.getQuery(Query.DELETE_GROUP,
+				getQuery(Query.DELETE_GROUP,
 						() -> this.channelMessageStoreQueryProvider.getDeleteMessageGroupQuery()),
-				this.getKey(groupId), this.region);
+				getKey(groupId), this.region);
 	}
 
 	/**
@@ -494,16 +491,11 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	 */
 	@Override
 	public Message<?> pollMessageFromGroup(Object groupId) {
-
-		final String key = getKey(groupId);
-		final Message<?> polledMessage = this.doPollForMessage(key);
-
-		if (polledMessage != null) {
-			if (!this.doRemoveMessageFromGroup(groupId, polledMessage)) {
-				return null;
-			}
+		String key = getKey(groupId);
+		Message<?> polledMessage = doPollForMessage(key);
+		if (polledMessage != null && !doRemoveMessageFromGroup(groupId, polledMessage)) {
+			return null;
 		}
-
 		return polledMessage;
 	}
 
@@ -515,9 +507,8 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	 * @return a message; could be null if query produced no Messages
 	 */
 	protected Message<?> doPollForMessage(String groupIdKey) {
-
-		final NamedParameterJdbcTemplate namedParameterJdbcTemplate = new NamedParameterJdbcTemplate(this.jdbcTemplate);
-		final MapSqlParameterSource parameters = new MapSqlParameterSource();
+		NamedParameterJdbcTemplate namedParameterJdbcTemplate = new NamedParameterJdbcTemplate(this.jdbcTemplate);
+		MapSqlParameterSource parameters = new MapSqlParameterSource();
 
 		parameters.addValue("region", this.region);
 		parameters.addValue("group_key", groupIdKey);
@@ -568,10 +559,7 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 				this.idCacheWriteLock.lock();
 				try {
 					boolean added = this.idCache.add(messageId);
-
-					if (logger.isDebugEnabled()) {
-						logger.debug(String.format("Polled message with id '%s' added: '%s'.", messageId, added));
-					}
+					LOGGER.debug(() -> String.format("Polled message with id '%s' added: '%s'.", messageId, added));
 				}
 				finally {
 					this.idCacheWriteLock.unlock();
@@ -584,21 +572,19 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	}
 
 	private boolean doRemoveMessageFromGroup(Object groupId, Message<?> messageToRemove) {
-		final UUID id = messageToRemove.getHeaders().getId();
-
+		UUID id = messageToRemove.getHeaders().getId();
 		int updated = this.jdbcTemplate.update(
 				getQuery(Query.DELETE_MESSAGE, () -> this.channelMessageStoreQueryProvider.getDeleteMessageQuery()),
-				new Object[] { getKey(id), getKey(groupId), this.region },
-				new int[] { Types.VARCHAR, Types.VARCHAR, Types.VARCHAR });
+				new Object[]{ getKey(id), getKey(groupId), this.region },
+				new int[]{ Types.VARCHAR, Types.VARCHAR, Types.VARCHAR });
 
 		boolean result = updated != 0;
 		if (result) {
-			logger.debug(String.format("Message with id '%s' was deleted.", id));
+			LOGGER.debug(() -> String.format("Message with id '%s' was deleted.", id));
 		}
 		else {
-			logger.warn(String.format("Message with id '%s' was not deleted.", id));
+			LOGGER.warn(() -> String.format("Message with id '%s' was not deleted.", id));
 		}
-
 		return result;
 	}
 
@@ -612,9 +598,7 @@ public class JdbcChannelMessageStore implements PriorityCapableChannelMessageSto
 	 * @param messageId The message identifier.
 	 */
 	public void removeFromIdCache(String messageId) {
-		if (logger.isDebugEnabled()) {
-			logger.debug("Removing Message Id: " + messageId);
-		}
+		LOGGER.debug(() -> "Removing Message Id: " + messageId);
 		this.idCacheWriteLock.lock();
 		try {
 			this.idCache.remove(messageId);

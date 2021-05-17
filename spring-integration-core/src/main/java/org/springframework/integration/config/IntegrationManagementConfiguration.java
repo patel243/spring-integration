@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 the original author or authors.
+ * Copyright 2015-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,9 @@
 
 package org.springframework.integration.config;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
 
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.context.annotation.Bean;
@@ -30,8 +28,8 @@ import org.springframework.context.annotation.Role;
 import org.springframework.core.annotation.AnnotationAttributes;
 import org.springframework.core.env.Environment;
 import org.springframework.core.type.AnnotationMetadata;
+import org.springframework.integration.support.management.metrics.MetricsCaptor;
 import org.springframework.util.Assert;
-import org.springframework.util.StringUtils;
 
 /**
  * {@code @Configuration} class that registers a {@link IntegrationManagementConfigurer} bean.
@@ -64,45 +62,15 @@ public class IntegrationManagementConfiguration implements ImportAware, Environm
 				"@EnableIntegrationManagement is not present on importing class " + importMetadata.getClassName());
 	}
 
-	@SuppressWarnings("deprecation")
 	@Bean(name = IntegrationManagementConfigurer.MANAGEMENT_CONFIGURER_NAME)
 	@Role(BeanDefinition.ROLE_INFRASTRUCTURE)
-	public IntegrationManagementConfigurer managementConfigurer() {
+	public IntegrationManagementConfigurer managementConfigurer(ObjectProvider<MetricsCaptor> metricsCaptorProvider) {
 		IntegrationManagementConfigurer configurer = new IntegrationManagementConfigurer();
-		setupCountsEnabledNamePatterns(configurer);
-		setupStatsEnabledNamePatterns(configurer);
 		configurer.setDefaultLoggingEnabled(
 				Boolean.parseBoolean(this.environment.resolvePlaceholders(
 						(String) this.attributes.get("defaultLoggingEnabled"))));
-		configurer.setDefaultCountsEnabled(
-				Boolean.parseBoolean(this.environment.resolvePlaceholders(
-						(String) this.attributes.get("defaultCountsEnabled"))));
-		configurer.setDefaultStatsEnabled(
-				Boolean.parseBoolean(this.environment.resolvePlaceholders(
-						(String) this.attributes.get("defaultStatsEnabled"))));
-		configurer.setMetricsFactoryBeanName((String) this.attributes.get("metricsFactory"));
+		configurer.setMetricsCaptorProvider(metricsCaptorProvider);
 		return configurer;
-	}
-
-	private void setupCountsEnabledNamePatterns(IntegrationManagementConfigurer configurer) {
-		List<String> patterns = new ArrayList<>();
-		String[] countsEnabled = this.attributes.getStringArray("countsEnabled");
-		for (String managedComponent : countsEnabled) {
-			String pattern = this.environment.resolvePlaceholders(managedComponent);
-			patterns.addAll(Arrays.asList(StringUtils.commaDelimitedListToStringArray(pattern)));
-		}
-		configurer.setEnabledCountsPatterns(patterns.toArray(new String[0]));
-	}
-
-	@SuppressWarnings("deprecation")
-	private void setupStatsEnabledNamePatterns(IntegrationManagementConfigurer configurer) {
-		List<String> patterns = new ArrayList<>();
-		String[] statsEnabled = this.attributes.getStringArray("statsEnabled");
-		for (String managedComponent : statsEnabled) {
-			String pattern = this.environment.resolvePlaceholders(managedComponent);
-			patterns.addAll(Arrays.asList(StringUtils.commaDelimitedListToStringArray(pattern)));
-		}
-		configurer.setEnabledStatsPatterns(patterns.toArray(new String[0]));
 	}
 
 }

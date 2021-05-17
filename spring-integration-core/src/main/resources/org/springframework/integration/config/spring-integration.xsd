@@ -537,12 +537,22 @@
 					</xsd:attribute>
 					<xsd:attribute name="min-subscribers" type="xsd:string">
 						<xsd:annotation>
-							<xsd:documentation><![CDATA[
+							<xsd:documentation>
 								Specifies the minimum subscribers required to be subscribed to this channel; if the minimum number
 								of subscribers receive the message, the send is deemed to be successful (returns true).
 								Defaults to 0.
-							]]></xsd:documentation>
+							</xsd:documentation>
 						</xsd:annotation>
+					</xsd:attribute>
+					<xsd:attribute name="require-subscribers" default="false">
+						<xsd:annotation>
+							<xsd:documentation>
+								Indicates if this channel may ignore or not a message when there are no subscribers.
+							</xsd:documentation>
+						</xsd:annotation>
+						<xsd:simpleType>
+							<xsd:union memberTypes="xsd:boolean xsd:string"/>
+						</xsd:simpleType>
 					</xsd:attribute>
 					<xsd:attributeGroup ref="subscribersAttributeGroup"/>
 				</xsd:extension>
@@ -1736,8 +1746,7 @@
 		<xsd:complexType>
 			<xsd:choice minOccurs="0" maxOccurs="2">
 				<xsd:element name="transactional" type="transactionalType" minOccurs="0" maxOccurs="1"/>
-				<xsd:element name="request-handler-advice-chain" type="handlerAdviceChainType" minOccurs="0"
-							 maxOccurs="1"/>
+				<xsd:element name="request-handler-advice-chain" type="handlerAdviceChainType" minOccurs="0"/>
 				<xsd:element ref="poller"/>
 			</xsd:choice>
 			<xsd:attributeGroup ref="inputOutputChannelGroup"/>
@@ -1751,7 +1760,15 @@
 					</xsd:documentation>
 				</xsd:annotation>
 			</xsd:attribute>
-			<xsd:attribute name="requires-reply" type="xsd:string" use="optional">
+			<xsd:attribute name="trigger-timeout" type="xsd:string">
+				<xsd:annotation>
+					<xsd:documentation>
+						The time in milliseconds to suspend the trigger thread.
+						If not provided a 'timeout' is used.
+					</xsd:documentation>
+				</xsd:annotation>
+			</xsd:attribute>
+			<xsd:attribute name="requires-reply" type="xsd:string">
 				<xsd:annotation>
 					<xsd:documentation>
 						Specify whether the barrier must return a non-null value. This value will be
@@ -2787,7 +2804,7 @@
 				</xsd:appinfo>
 			</xsd:annotation>
 		</xsd:attribute>
-		<xsd:attribute name="white-list">
+		<xsd:attribute name="allow-list">
 			<xsd:annotation>
 				<xsd:documentation>
 					When using the default Deserializer, a list of package/class patterns indicating
@@ -3896,6 +3913,7 @@
 							the MessageGroup won't be scheduled to be forced complete.
 							The action taken when the group is forced complete depends on the
 							'send-partial-result-on-expiry' attribute.
+                            Can be evaluated directly to 'java.util.Date' instance for a scheduled task.
 							Mutually exclusive with the 'group-timeout' attribute.
 						</xsd:documentation>
 					</xsd:annotation>
@@ -4036,6 +4054,35 @@
 					<xsd:simpleType>
 						<xsd:union memberTypes="xsd:boolean xsd:string"/>
 					</xsd:simpleType>
+				</xsd:attribute>
+				<xsd:attribute name="expire-timeout" type="xsd:string">
+					<xsd:annotation>
+						<xsd:documentation>
+							The timeout for old groups in the store to purge on startup.
+							If 'expire-duration' is also provided, the purge task is scheduled
+							periodically to purge old groups with this expiration timeout.
+						</xsd:documentation>
+					</xsd:annotation>
+				</xsd:attribute>
+				<xsd:attribute name="expire-duration" type="xsd:string">
+					<xsd:annotation>
+						<xsd:documentation>
+							The 'Duration' (in milliseconds) how often to run purge old groups scheduled task.
+						</xsd:documentation>
+					</xsd:annotation>
+				</xsd:attribute>
+				<xsd:attribute name="group-condition-supplier" type="xsd:string">
+					<xsd:annotation>
+						<xsd:appinfo>
+							<tool:annotation kind="ref">
+								<tool:expected-type type="java.util.function.BiFunction"/>
+							</tool:annotation>
+						</xsd:appinfo>
+						<xsd:documentation>
+							A reference to a 'java.util.function.BiFunction' bean that may provide a group
+							condition evaluated against the message to be added to the group.
+						</xsd:documentation>
+					</xsd:annotation>
 				</xsd:attribute>
 			</xsd:extension>
 		</xsd:complexContent>
@@ -4899,69 +4946,6 @@ The list of component name patterns you want to track (e.g.,  tracked-components
 						Set false, to disable all main-path debug logging for components that implement
 						'IntegrationManagement' (channels, message handlers etc). For high-volume environments
 						avoiding calls to 'isDebuggingEnabled()` can improve performance.
-					</xsd:documentation>
-				</xsd:annotation>
-			</xsd:attribute>
-			<xsd:attribute name="default-counts-enabled" use="optional">
-				<xsd:annotation>
-					<xsd:documentation>
-						The default value for components that don't match 'counts-enabled-patterns'.
-						Defaults to false, or true when an Integration MBean Exporter is provided.
-					</xsd:documentation>
-				</xsd:annotation>
-			</xsd:attribute>
-			<xsd:attribute name="default-stats-enabled" use="optional">
-				<xsd:annotation>
-					<xsd:documentation>
-						The default value for components that don't match 'stats-enabled-patterns'.
-						Defaults to false, or true when an Integration MBean Exporter is provided.
-					</xsd:documentation>
-				</xsd:annotation>
-			</xsd:attribute>
-			<xsd:attribute name="counts-enabled-patterns" use="optional">
-				<xsd:annotation>
-					<xsd:documentation>
-						Comma separated list of simple patterns for component names for which message counts
-						will be enabled (defaults to '*'). Only patterns that also match 'managed-components'
-						will be considered. Enables message counting (`sendCount`, `errorCount`, `receiveCount`)
-						for those components that support counters (channels, message handlers, etc).
-						This is the initial setting only, individual components can have counts enabled/disabled
-						at runtime. May be overridden by an entry in 'stats-enabled' which is additional
-						functionality over simple counts. If a pattern starts with `!`, counts are disabled
-						for matches. For components with names that match multiple patterns, the first pattern wins.
-						Disabling counts at runtime also disables stats.
-					</xsd:documentation>
-				</xsd:annotation>
-			</xsd:attribute>
-			<xsd:attribute name="stats-enabled-patterns" use="optional">
-				<xsd:annotation>
-					<xsd:documentation>
-						Comma separated list of simple patterns for component names for which message statistics
-						will be enabled (response times, rates etc), as well as counts (a positive match here
-						overrides `counts-enabled`, you can't have statistics without counts).
-						(defaults to '*'). Only patterns that also match 'managed-components'
-						will be considered. Enables statistics for those components that support
-						statistics (channels - when sending, message handlers, etc).
-						This is the initial setting only, individual components can have stats enabled/disabled
-						at runtime. If a pattern starts with `!`, stats (and counts) are disabled
-						for matches. Note: this means that '!foo' here will disable stats
-						and counts for 'foo' even if counts are enabled for 'foo' in 'counts-enabled'.
-						For components with names that match multiple patterns, the first pattern wins.
-						Enabling stats at runtime also enables counts.
-					</xsd:documentation>
-				</xsd:annotation>
-			</xsd:attribute>
-			<xsd:attribute name="metrics-factory" use="optional">
-				<xsd:annotation>
-					<xsd:appinfo>
-						<tool:annotation kind="ref">
-							<tool:expected-type
-									type="org.springframework.integration.support.management.MetricsFactory"/>
-						</tool:annotation>
-					</xsd:appinfo>
-					<xsd:documentation>
-						A MetricsFactory responsible for creating objects that maintain metrics for message
-						channels and message handlers.
 					</xsd:documentation>
 				</xsd:annotation>
 			</xsd:attribute>

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2021 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,8 @@ import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.Expression;
-import org.springframework.expression.common.LiteralExpression;
 import org.springframework.integration.expression.ExpressionUtils;
+import org.springframework.integration.expression.ValueExpression;
 import org.springframework.integration.jpa.support.JpaParameter;
 import org.springframework.integration.jpa.support.PersistMode;
 import org.springframework.integration.jpa.support.parametersource.BeanPropertyParameterSourceFactory;
@@ -163,7 +163,7 @@ public class JpaExecutor implements InitializingBean, BeanFactoryAware {
 	}
 
 	/**
-	 * Sets the class type which is being used for retrieving entities from the
+	 * Set the class type which is being used for retrieving entities from the
 	 * database.
 	 * @param entityClass Must not be null.
 	 */
@@ -359,7 +359,7 @@ public class JpaExecutor implements InitializingBean, BeanFactoryAware {
 	 * @see javax.persistence.Query#setMaxResults(int)
 	 */
 	public void setMaxNumberOfResults(int maxNumberOfResults) {
-		this.setMaxResultsExpression(new LiteralExpression("" + maxNumberOfResults));
+		this.setMaxResultsExpression(new ValueExpression<>(maxNumberOfResults));
 	}
 
 	@Override
@@ -537,7 +537,7 @@ public class JpaExecutor implements InitializingBean, BeanFactoryAware {
 		return payload;
 	}
 
-	private void checkDelete(final Object payload) {
+	private void checkDelete(@Nullable Object payload) {
 		if (payload != null && this.deleteAfterPoll) {
 			if (payload instanceof Iterable) {
 				if (this.deleteInBatch) {

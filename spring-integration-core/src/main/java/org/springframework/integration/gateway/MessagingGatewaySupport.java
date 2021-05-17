@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2019 the original author or authors.
+ * Copyright 2002-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,8 @@
 package org.springframework.integration.gateway;
 
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
@@ -46,7 +47,12 @@ import org.springframework.integration.support.ErrorMessageUtils;
 import org.springframework.integration.support.MessageBuilderFactory;
 import org.springframework.integration.support.MutableMessageBuilder;
 import org.springframework.integration.support.converter.SimpleMessageConverter;
+import org.springframework.integration.support.management.IntegrationInboundManagement;
 import org.springframework.integration.support.management.IntegrationManagedResource;
+import org.springframework.integration.support.management.metrics.MeterFacade;
+import org.springframework.integration.support.management.metrics.MetricsCaptor;
+import org.springframework.integration.support.management.metrics.SampleFacade;
+import org.springframework.integration.support.management.metrics.TimerFacade;
 import org.springframework.lang.Nullable;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
@@ -61,7 +67,7 @@ import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.util.Assert;
 
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.MonoProcessor;
+import reactor.core.publisher.Sinks;
 
 /**
  * A convenient base class for connecting application code to
@@ -73,11 +79,10 @@ import reactor.core.publisher.MonoProcessor;
  * @author Gary Russell
  * @author Artem Bilan
  */
-@SuppressWarnings("deprecation")
 @IntegrationManagedResource
 public abstract class MessagingGatewaySupport extends AbstractEndpoint
 		implements org.springframework.integration.support.management.TrackableComponent,
-		org.springframework.integration.support.management.MessageSourceMetrics, IntegrationPattern {
+		IntegrationInboundManagement, IntegrationPattern {
 
 	private static final long DEFAULT_TIMEOUT = 1000L;
 
@@ -90,11 +95,11 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 
 	private final Object replyMessageCorrelatorMonitor = new Object();
 
-	private boolean errorOnTimeout;
-
-	private final AtomicLong messageCount = new AtomicLong();
-
 	private final ManagementOverrides managementOverrides = new ManagementOverrides();
+
+	private final Set<TimerFacade> timers = ConcurrentHashMap.newKeySet();
+
+	private boolean errorOnTimeout;
 
 	private ErrorMessageStrategy errorMessageStrategy = new DefaultErrorMessageStrategy();
 
@@ -114,13 +119,15 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 
 	private InboundMessageMapper<Object> requestMapper = new DefaultRequestMapper();
 
+	private boolean loggingEnabled = true;
+
 	private String managedType;
 
 	private String managedName;
 
-	private boolean countsEnabled;
+	private MetricsCaptor metricsCaptor;
 
-	private boolean loggingEnabled = true;
+	private TimerFacade successTimer;
 
 	private volatile AbstractEndpoint replyMessageCorrelator;
 
@@ -275,36 +282,6 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 	}
 
 	@Override
-	public int getMessageCount() {
-		return (int) this.messageCount.get();
-	}
-
-	@Override
-	public long getMessageCountLong() {
-		return this.messageCount.get();
-	}
-
-	@Override
-	public void setManagedName(String name) {
-		this.managedName = name;
-	}
-
-	@Override
-	public String getManagedName() {
-		return this.managedName;
-	}
-
-	@Override
-	public void setManagedType(String type) {
-		this.managedType = type;
-	}
-
-	@Override
-	public String getManagedType() {
-		return this.managedType;
-	}
-
-	@Override
 	public String getComponentType() {
 		return "gateway";
 	}
@@ -318,17 +295,6 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 	@Override
 	public boolean isLoggingEnabled() {
 		return this.loggingEnabled;
-	}
-
-	@Override
-	public void setCountsEnabled(boolean countsEnabled) {
-		this.countsEnabled = countsEnabled;
-		this.managementOverrides.countsConfigured = true;
-	}
-
-	@Override
-	public boolean isCountsEnabled() {
-		return this.countsEnabled;
 	}
 
 	/**
@@ -348,8 +314,33 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 	}
 
 	@Override
+	public void setManagedType(String managedType) {
+		this.managedType = managedType;
+	}
+
+	@Override
+	public String getManagedType() {
+		return this.managedType;
+	}
+
+	@Override
+	public void setManagedName(String managedName) {
+		this.managedName = managedName;
+	}
+
+	@Override
+	public String getManagedName() {
+		return this.managedName;
+	}
+
+	@Override
 	public IntegrationPatternType getIntegrationPatternType() {
 		return IntegrationPatternType.inbound_gateway;
+	}
+
+	@Override
+	public void registerMetricsCaptor(MetricsCaptor metricsCaptorToRegister) {
+		this.metricsCaptor = metricsCaptorToRegister;
 	}
 
 	@Override
@@ -429,13 +420,20 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 		MessageChannel channel = getRequestChannel();
 		Assert.state(channel != null,
 				"send is not supported, because no request channel has been configured");
+		SampleFacade sample = null;
+		if (this.metricsCaptor != null) {
+			sample = this.metricsCaptor.start();
+		}
 		try {
-			if (this.countsEnabled) {
-				this.messageCount.incrementAndGet();
-			}
 			this.messagingTemplate.convertAndSend(channel, object, this.historyWritingPostProcessor);
+			if (sample != null) {
+				sample.stop(sendTimer());
+			}
 		}
 		catch (Exception e) {
+			if (sample != null) {
+				sample.stop(buildSendTimer(false, e.getClass().getSimpleName()));
+			}
 			MessageChannel errorChan = getErrorChannel();
 			if (errorChan != null) {
 				this.messagingTemplate.send(errorChan, new ErrorMessage(e));
@@ -506,9 +504,10 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 
 		Object reply;
 		Message<?> requestMessage = null;
+		SampleFacade sample = null;
 		try {
-			if (this.countsEnabled) {
-				this.messageCount.incrementAndGet();
+			if (this.metricsCaptor != null) {
+				sample = this.metricsCaptor.start();
 			}
 			if (shouldConvert) {
 				reply = this.messagingTemplate.convertSendAndReceive(channel, object, Object.class,
@@ -525,12 +524,18 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 			if (reply == null && this.errorOnTimeout) {
 				throwMessageTimeoutException(object, "No reply received within timeout");
 			}
+			if (sample != null) {
+				sample.stop(sendTimer());
+			}
 		}
-		catch (Exception ex) {
+		catch (Throwable ex) { // NOSONAR (catch throwable)
 			if (logger.isDebugEnabled()) {
 				logger.debug("failure occurred in gateway sendAndReceive: " + ex.getMessage());
 			}
 			reply = ex;
+			if (sample != null) {
+				sample.stop(buildSendTimer(false, ex.getClass().getSimpleName()));
+			}
 		}
 
 		if (reply instanceof Throwable || reply instanceof ErrorMessage) {
@@ -560,6 +565,9 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 						? errorFlowReply.getPayload()
 						: errorFlowReply;
 			}
+		}
+		else if (error instanceof Error) {
+			throw (Error) error;
 		}
 		else {
 			Throwable errorToReThrow = error;
@@ -614,38 +622,39 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 	private Mono<Message<?>> doSendAndReceiveMessageReactive(MessageChannel requestChannel, Object object,
 			boolean error) {
 
+		Message<?> requestMessage;
+		try {
+			Message<?> message =
+					object instanceof Message<?>
+							? (Message<?>) object
+							: this.requestMapper.toMessage(object);
+			Assert.state(message != null, () -> "request mapper resulted in no message for " + object);
+			message = this.historyWritingPostProcessor.postProcessMessage(message);
+			requestMessage = message;
+		}
+		catch (Exception e) {
+			throw new MessageMappingException("Cannot map to message: " + object, e);
+		}
+
 		return Mono.defer(() -> {
-			Message<?> message;
-			try {
-				message = object instanceof Message<?>
-						? (Message<?>) object
-						: this.requestMapper.toMessage(object);
-
-				message = this.historyWritingPostProcessor.postProcessMessage(message);
-
-			}
-			catch (Exception e) {
-				throw new MessageMappingException("Cannot map to message: " + object, e);
-			}
-
-			Object originalReplyChannelHeader = message.getHeaders().getReplyChannel();
-			Object originalErrorChannelHeader = message.getHeaders().getErrorChannel();
+			Object originalReplyChannelHeader = requestMessage.getHeaders().getReplyChannel();
+			Object originalErrorChannelHeader = requestMessage.getHeaders().getErrorChannel();
 
 			MonoReplyChannel replyChan = new MonoReplyChannel();
 
-			Message<?> requestMessage = MutableMessageBuilder.fromMessage(message)
+			Message<?> messageToSend = MutableMessageBuilder.fromMessage(requestMessage)
 					.setReplyChannel(replyChan)
 					.setHeader(this.messagingTemplate.getSendTimeoutHeader(), null)
 					.setHeader(this.messagingTemplate.getReceiveTimeoutHeader(), null)
 					.setErrorChannel(replyChan)
 					.build();
 
-			sendMessageForReactiveFlow(requestChannel, requestMessage);
+			sendMessageForReactiveFlow(requestChannel, messageToSend);
 
-			return buildReplyMono(requestMessage, replyChan.replyMono, error, originalReplyChannelHeader,
-					originalErrorChannelHeader)
-					.onErrorResume(t -> error ? Mono.error(t) : handleSendError(requestMessage, t));
-		});
+			return buildReplyMono(requestMessage, replyChan.replyMono.asMono(), error, originalReplyChannelHeader,
+					originalErrorChannelHeader);
+		})
+				.onErrorResume(t -> error ? Mono.error(t) : handleSendError(requestMessage, t));
 	}
 
 	private void sendMessageForReactiveFlow(MessageChannel requestChannel, Message<?> requestMessage) {
@@ -672,10 +681,11 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 	private Mono<Message<?>> buildReplyMono(Message<?> requestMessage, Mono<Message<?>> reply, boolean error,
 			@Nullable Object originalReplyChannelHeader, @Nullable Object originalErrorChannelHeader) {
 
+		MetricsCaptor captor = this.metricsCaptor;
 		return reply
 				.doOnSubscribe(s -> {
-					if (!error && this.countsEnabled) {
-						this.messageCount.incrementAndGet();
+					if (!error && captor != null) {
+						captor.start().stop(sendTimer());
 					}
 				})
 				.<Message<?>>map(replyMessage -> {
@@ -716,6 +726,25 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 			// no errorChannel so we'll propagate
 			throw wrapExceptionIfNecessary(exception, "gateway received checked Exception");
 		}
+	}
+
+	protected TimerFacade sendTimer() {
+		if (this.successTimer == null) {
+			this.successTimer = buildSendTimer(true, "none");
+		}
+		return this.successTimer;
+	}
+
+	protected TimerFacade buildSendTimer(boolean success, String exception) {
+		TimerFacade timer = this.metricsCaptor.timerBuilder(SEND_TIMER_NAME)
+				.tag("type", "source")
+				.tag("name", getComponentName() == null ? "unknown" : getComponentName())
+				.tag("result", success ? "success" : "failure")
+				.tag("exception", exception)
+				.description("Send processing time")
+				.build();
+		this.timers.add(timer);
+		return timer;
 	}
 
 	private long sendTimeout(Message<?> requestMessage) {
@@ -793,23 +822,21 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 				}
 				else if (replyChan instanceof PollableChannel) {
 					PollingConsumer endpoint = new PollingConsumer((PollableChannel) replyChan, handler);
-					if (beanFactory != null) {
-						endpoint.setBeanFactory(beanFactory);
-					}
 					endpoint.setReceiveTimeout(this.replyTimeout);
-					endpoint.afterPropertiesSet();
 					correlator = endpoint;
 				}
 				else if (replyChan instanceof ReactiveStreamsSubscribableChannel) {
-					ReactiveStreamsConsumer endpoint =
-							new ReactiveStreamsConsumer(replyChan, (Subscriber<Message<?>>) handler);
-					endpoint.afterPropertiesSet();
-					correlator = endpoint;
+					correlator = new ReactiveStreamsConsumer(replyChan, (Subscriber<Message<?>>) handler);
 				}
 				else {
 					throw new MessagingException("Unsupported 'replyChannel' type [" + replyChan.getClass() + "]."
 							+ "SubscribableChannel or PollableChannel type are supported.");
 				}
+
+				if (beanFactory != null) {
+					correlator.setBeanFactory(beanFactory);
+				}
+				correlator.afterPropertiesSet();
 				this.replyMessageCorrelator = correlator;
 			}
 			if (isRunning()) {
@@ -833,10 +860,11 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 	}
 
 	@Override
-	public void reset() {
-		this.messageCount.set(0);
+	public void destroy() {
+		super.destroy();
+		this.timers.forEach(MeterFacade::remove);
+		this.timers.clear();
 	}
-
 
 	private static class DefaultRequestMapper implements InboundMessageMapper<Object> {
 
@@ -861,22 +889,22 @@ public abstract class MessagingGatewaySupport extends AbstractEndpoint
 
 	private static class MonoReplyChannel implements MessageChannel, ReactiveStreamsSubscribableChannel {
 
-		private final MonoProcessor<Message<?>> replyMono = MonoProcessor.create();
+		private final Sinks.One<Message<?>> replyMono = Sinks.one();
 
 		MonoReplyChannel() {
 		}
 
 		@Override
 		public boolean send(Message<?> message, long timeout) {
-			this.replyMono.onNext(message);
-			this.replyMono.onComplete();
-			return true;
+			return this.replyMono.tryEmitValue(message).isSuccess();
 		}
 
 		@Override
 		public void subscribeTo(Publisher<? extends Message<?>> publisher) {
-			this.replyMono.switchIfEmpty(Mono.from(publisher));
-			this.replyMono.onComplete();
+			Mono.from(publisher)
+					.subscribe(
+							(value) -> this.replyMono.emitValue(value, Sinks.EmitFailureHandler.FAIL_FAST),
+							this.replyMono::tryEmitError, this.replyMono::tryEmitEmpty);
 		}
 
 	}

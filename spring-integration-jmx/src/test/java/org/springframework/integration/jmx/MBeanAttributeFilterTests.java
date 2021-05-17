@@ -1,5 +1,5 @@
 /*
- * Copyright 2013-2019 the original author or authors.
+ * Copyright 2013-2020 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,8 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Test;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -33,16 +32,15 @@ import org.springframework.integration.endpoint.SourcePollingChannelAdapter;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.PollableChannel;
 import org.springframework.test.annotation.DirtiesContext;
-import org.springframework.test.context.ContextConfiguration;
-import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 /**
  * @author Stuart Williams
  * @author Gary Russell
+ * @author Artem Bilan
  *
  */
-@RunWith(SpringJUnit4ClassRunner.class)
-@ContextConfiguration
+@SpringJUnitConfig
 @DirtiesContext
 public class MBeanAttributeFilterTests {
 
@@ -78,11 +76,11 @@ public class MBeanAttributeFilterTests {
 
 		@SuppressWarnings("unchecked")
 		Map<String, Object> bean = (Map<String, Object>) payload
-				.get(domain + ":name=in,type=MessageChannel");
+				.get(this.domain + ":name=out,type=MessageChannel");
 
 		assertThat(bean.size()).isEqualTo(2);
-		assertThat(bean.containsKey("SendCount")).isTrue();
-		assertThat(bean.containsKey("SendErrorCount")).isTrue();
+		assertThat(bean.containsKey("QueueSize")).isTrue();
+		assertThat(bean.containsKey("RemainingCapacity")).isTrue();
 
 		adapter.stop();
 	}
@@ -106,12 +104,9 @@ public class MBeanAttributeFilterTests {
 		Map<String, Object> bean = (Map<String, Object>) payload
 				.get(domain + ":name=in,type=MessageChannel");
 
-		List<String> keys = new ArrayList<String>(bean.keySet());
+		List<String> keys = new ArrayList<>(bean.keySet());
 		Collections.sort(keys);
-		assertThat(keys)
-				.containsExactly("LoggingEnabled", "MaxSendDuration", "MeanErrorRate", "MeanErrorRatio",
-						"MeanSendDuration", "MeanSendRate", "MinSendDuration", "StandardDeviationSendDuration",
-						"SubscriberCount", "TimeSinceLastSend");
+		assertThat(keys).containsExactly("LoggingEnabled", "SubscriberCount");
 
 		adapterNot.stop();
 	}
